@@ -21,6 +21,33 @@ def test_version():
     assert "version" in data["result"]
 
 
+def test_guide():
+    result = runner.invoke(app, ["guide"])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["ok"] is True
+    assert data["command"] == "guide"
+    guide = data["result"]
+    # Check all top-level sections are present
+    assert "overview" in guide
+    assert "workflow" in guide
+    assert "commands" in guide
+    assert "ref_syntax" in guide
+    assert "response_format" in guide
+    assert "error_codes" in guide
+    assert "exit_codes" in guide
+    assert "safety" in guide
+    assert "examples" in guide
+    # Check commands are grouped
+    assert "inspection" in guide["commands"]
+    assert "mutation" in guide["commands"]
+    assert "reading" in guide["commands"]
+    # Check workflow has steps
+    assert len(guide["workflow"]["steps"]) >= 5
+    # Check examples are present
+    assert len(guide["examples"]) >= 3
+
+
 def test_wb_inspect(simple_workbook: Path):
     result = runner.invoke(app, ["wb", "inspect", "--file", str(simple_workbook)])
     assert result.exit_code == 0

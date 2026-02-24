@@ -33,21 +33,249 @@ from xl.observe.events import Timer
 # ---------------------------------------------------------------------------
 # App & subcommand groups
 # ---------------------------------------------------------------------------
-app = typer.Typer(name="xl", help="Agent-first Excel CLI", no_args_is_help=True)
 
-wb_app = typer.Typer(name="wb", help="Workbook operations", no_args_is_help=True)
-sheet_app = typer.Typer(name="sheet", help="Sheet operations", no_args_is_help=True)
-table_app = typer.Typer(name="table", help="Table operations", no_args_is_help=True)
-cell_app = typer.Typer(name="cell", help="Cell operations", no_args_is_help=True)
-range_app = typer.Typer(name="range", help="Range operations", no_args_is_help=True)
-formula_app = typer.Typer(name="formula", help="Formula operations", no_args_is_help=True)
-format_app = typer.Typer(name="format", help="Formatting operations", no_args_is_help=True)
-query_app = typer.Typer(name="query", help="SQL-like table querying")
-validate_app = typer.Typer(name="validate", help="Validation commands", no_args_is_help=True)
-plan_app = typer.Typer(name="plan", help="Patch plan operations", no_args_is_help=True)
-apply_app = typer.Typer(name="apply", help="Apply patch plans")
-verify_app = typer.Typer(name="verify", help="Post-apply assertions")
-diff_app = typer.Typer(name="diff", help="Compare workbook states")
+_MAIN_HELP = """\
+Agent-first CLI for reading, transforming, and validating Excel workbooks (.xlsx/.xlsm).
+
+**Recommended workflow:**  inspect → plan → validate → apply → verify
+
+1. `xl wb inspect -f data.xlsx`  — discover sheets, tables, named ranges, fingerprint
+2. `xl plan add-column -f data.xlsx -t Sales -n Margin --formula "=[@Revenue]-[@Cost]"`
+3. `xl validate plan -f data.xlsx --plan plan.json`
+4. `xl apply -f data.xlsx --plan plan.json --dry-run`  — preview changes
+5. `xl apply -f data.xlsx --plan plan.json --backup`   — apply with backup
+6. `xl verify assert -f data.xlsx --assertions '[{"type":"table.column_exists","table":"Sales","column":"Margin"}]'`
+
+**Every command** returns a JSON `ResponseEnvelope`:
+`{"ok": bool, "command": "...", "result": {...}, "errors": [...], "warnings": [...], "metrics": {"duration_ms": N}}`
+
+**Ref syntax** used by cell/range/formula/format commands:
+- Cell: `Sheet1!B2` — Range: `Sheet1!A1:D10` — Table column: `TableName[ColumnName]`
+
+**Safety rails** — all mutating commands support:
+- `--dry-run` previews changes without writing
+- `--backup` creates a timestamped .bak copy before writing
+- Fingerprint-based conflict detection prevents stale overwrites
+
+**Exit codes:** 0=success, 10=validation, 20=protection, 30=formula, 40=conflict, 50=io, 90=internal
+
+Run `xl guide` for a comprehensive machine-readable orientation.
+"""
+
+_WB_EPILOG = """\
+**Examples:**
+
+`xl wb inspect -f data.xlsx`  — returns sheets, tables, named ranges, fingerprint
+
+`xl wb lock-status -f data.xlsx`  — check if another process holds a lock
+
+The **fingerprint** (xxhash of file contents) is used by patch plans for conflict detection.
+Use `xl wb inspect` as the first step to understand any workbook.
+"""
+
+_SHEET_EPILOG = """\
+**Examples:**
+
+`xl sheet ls -f data.xlsx`  — list all sheets with dimensions and visibility
+
+Sheet names are required in ref syntax for cell/range commands (e.g. `Sheet1!A1`).
+Use this command to discover valid sheet names before other operations.
+"""
+
+_TABLE_EPILOG = """\
+**Examples:**
+
+`xl table ls -f data.xlsx`  — list all tables with columns, row counts, sheet locations
+
+`xl table add-column -f data.xlsx -t Sales -n Profit --formula "=[@Revenue]-[@Cost]"`
+
+`xl table append-rows -f data.xlsx -t Sales --data '[{"Revenue":100,"Cost":60}]'`
+
+**Table column refs** use structured references: `TableName[ColumnName]` (usable in formula and format commands).
+Prefer table-level operations over raw cell manipulation when data is in Excel tables.
+"""
+
+_CELL_EPILOG = """\
+**Examples:**
+
+`xl cell get -f data.xlsx --ref "Sheet1!B2"`
+
+`xl cell set -f data.xlsx --ref "Sheet1!B2" --value 42 --type number`
+
+`xl cell set -f data.xlsx --ref "Sheet1!B2" --value "Hello" --type text`
+
+**Ref format:** always include the sheet name — `SheetName!CellRef` (e.g. `Sheet1!B2`).
+**Formula protection:** setting a cell that contains a formula requires `--force-overwrite-formulas`.
+"""
+
+_RANGE_EPILOG = """\
+**Examples:**
+
+`xl range stat -f data.xlsx --ref "Sheet1!C2:C100"`  — min, max, mean, sum, count, stddev
+
+`xl range clear -f data.xlsx --ref "Sheet1!A1:D10" --contents`  — clear values only
+
+`xl range clear -f data.xlsx --ref "Sheet1!A1:D10" --all`  — clear values and formatting
+
+**Ref format:** `SheetName!StartCell:EndCell` (e.g. `Sheet1!A1:D10`).
+"""
+
+_FORMULA_EPILOG = """\
+**Examples:**
+
+`xl formula set -f data.xlsx --ref "Sheet1!E2" --formula "=C2-D2"`
+
+`xl formula set -f data.xlsx --ref "Sales[Margin]" --formula "=[@Revenue]-[@Cost]"`  — table column
+
+`xl formula lint -f data.xlsx`  — find volatile functions, broken refs, common issues
+
+`xl formula find -f data.xlsx --pattern "VLOOKUP"`  — search by regex
+
+**Safety:** overwriting existing formulas requires `--force-overwrite-formulas`.
+Overwriting existing values requires `--force-overwrite-values`.
+"""
+
+_FORMAT_EPILOG = """\
+**Examples:**
+
+`xl format number -f data.xlsx --ref "Sheet1!C2:C100" --style currency --decimals 2`
+
+`xl format number -f data.xlsx --ref "Sales[Revenue]" --style number --decimals 0`  — table column ref
+
+`xl format width -f data.xlsx --sheet Sheet1 --columns A,B,C --width 15`
+
+`xl format freeze -f data.xlsx --sheet Sheet1 --ref B2`  — freeze rows above and columns left of B2
+
+`xl format freeze -f data.xlsx --sheet Sheet1 --unfreeze`  — remove freeze
+
+**Styles:** number, percent, currency, date, text.
+**Refs:** `Sheet!Range` or `TableName[Column]` for number formatting.
+"""
+
+_VALIDATE_EPILOG = """\
+**Examples:**
+
+`xl validate workbook -f data.xlsx`  — check workbook health (corrupt refs, missing sheets)
+
+`xl validate plan -f data.xlsx --plan plan.json`  — check plan against workbook (fingerprint, tables, columns)
+
+`xl validate refs -f data.xlsx --ref "Sheet1!A1:D10"`  — verify a ref points to valid cells
+
+Run validation **before** `xl apply` to catch issues early.
+"""
+
+_PLAN_EPILOG = """\
+**Patch plans** are JSON files describing changes to apply atomically.
+Generate → compose → validate → apply (with --dry-run first).
+
+**Examples:**
+
+`xl plan add-column -f data.xlsx -t Sales -n Margin --formula "=[@Revenue]-[@Cost]"` — generate plan JSON
+
+`xl plan set-cells -f data.xlsx --ref "Sheet1!B2" --value 42 --type number`
+
+`xl plan format -f data.xlsx --ref "Sales[Revenue]" --style currency --decimals 2`
+
+`xl plan compose --plan plan1.json --plan plan2.json`  — merge multiple plans
+
+`xl plan show --plan plan.json`  — inspect a plan
+
+Plans include a **fingerprint** of the target workbook for conflict detection.
+Use `--append plan.json` on generators to build multi-operation plans incrementally.
+"""
+
+_VERIFY_EPILOG = """\
+**Examples:**
+
+`xl verify assert -f data.xlsx --assertions '[{"type":"table.column_exists","table":"Sales","column":"Margin"}]'`
+
+`xl verify assert -f data.xlsx --assertions-file assertions.json`
+
+**Assertion types:** `table.column_exists`, `cell.value_equals`, `cell.not_empty`, `row_count.gte`.
+Run after `xl apply` to confirm the workbook is in the expected state.
+"""
+
+_DIFF_EPILOG = """\
+**Examples:**
+
+`xl diff compare --file-a original.xlsx --file-b modified.xlsx`
+
+`xl diff compare --file-a original.xlsx --file-b modified.xlsx --sheet Revenue`  — single sheet
+
+Returns cell-level changes, sheets added/removed, and fingerprint comparison.
+Useful for reviewing changes after `xl apply`.
+"""
+
+app = typer.Typer(
+    name="xl",
+    help=_MAIN_HELP,
+    no_args_is_help=True,
+    rich_markup_mode="markdown",
+)
+
+wb_app = typer.Typer(
+    name="wb", help="Workbook-level inspection and status.",
+    epilog=_WB_EPILOG,
+    no_args_is_help=True, rich_markup_mode="markdown",
+)
+sheet_app = typer.Typer(
+    name="sheet", help="Sheet listing and discovery.",
+    epilog=_SHEET_EPILOG,
+    no_args_is_help=True, rich_markup_mode="markdown",
+)
+table_app = typer.Typer(
+    name="table", help="Table operations — list, add columns, append rows.",
+    epilog=_TABLE_EPILOG,
+    no_args_is_help=True, rich_markup_mode="markdown",
+)
+cell_app = typer.Typer(
+    name="cell", help="Read and write individual cell values.",
+    epilog=_CELL_EPILOG,
+    no_args_is_help=True, rich_markup_mode="markdown",
+)
+range_app = typer.Typer(
+    name="range", help="Range statistics and clearing.",
+    epilog=_RANGE_EPILOG,
+    no_args_is_help=True, rich_markup_mode="markdown",
+)
+formula_app = typer.Typer(
+    name="formula", help="Set, lint, and search formulas.",
+    epilog=_FORMULA_EPILOG,
+    no_args_is_help=True, rich_markup_mode="markdown",
+)
+format_app = typer.Typer(
+    name="format", help="Number formatting, column widths, and freeze panes.",
+    epilog=_FORMAT_EPILOG,
+    no_args_is_help=True, rich_markup_mode="markdown",
+)
+query_app = typer.Typer(
+    name="query", help="SQL queries over table data (via DuckDB).",
+    rich_markup_mode="markdown",
+)
+validate_app = typer.Typer(
+    name="validate", help="Validate workbook health, plans, and references.",
+    epilog=_VALIDATE_EPILOG,
+    no_args_is_help=True, rich_markup_mode="markdown",
+)
+plan_app = typer.Typer(
+    name="plan", help="Generate, inspect, and compose patch plans.",
+    epilog=_PLAN_EPILOG,
+    no_args_is_help=True, rich_markup_mode="markdown",
+)
+apply_app = typer.Typer(
+    name="apply", help="Apply patch plans to workbooks.",
+    rich_markup_mode="markdown",
+)
+verify_app = typer.Typer(
+    name="verify", help="Run post-apply assertions to confirm expected state.",
+    epilog=_VERIFY_EPILOG,
+    rich_markup_mode="markdown",
+)
+diff_app = typer.Typer(
+    name="diff", help="Compare two workbook files cell by cell.",
+    epilog=_DIFF_EPILOG,
+    rich_markup_mode="markdown",
+)
 
 app.add_typer(wb_app)
 app.add_typer(sheet_app)
@@ -62,9 +290,9 @@ app.add_typer(verify_app)
 app.add_typer(diff_app)
 
 # Type aliases for common options
-FilePath = Annotated[str, typer.Option("--file", "-f", help="Path to Excel workbook")]
-JsonFlag = Annotated[bool, typer.Option("--json", help="JSON output")]
-SheetOpt = Annotated[Optional[str], typer.Option("--sheet", "-s", help="Sheet name")]
+FilePath = Annotated[str, typer.Option("--file", "-f", help="Path to .xlsx/.xlsm workbook file")]
+JsonFlag = Annotated[bool, typer.Option("--json", help="JSON output (always on — all output is JSON)")]
+SheetOpt = Annotated[Optional[str], typer.Option("--sheet", "-s", help="Sheet name (as shown by 'xl sheet ls')")]
 
 
 # ---------------------------------------------------------------------------
@@ -85,8 +313,197 @@ def _emit(envelope, code=None):
 # ---------------------------------------------------------------------------
 @app.command()
 def version():
-    """Print version."""
+    """Print the xl CLI version.
+
+    Example: `xl version`
+    """
     env = success_envelope("version", {"version": xl.__version__})
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl guide
+# ---------------------------------------------------------------------------
+@app.command()
+def guide(
+    json_out: JsonFlag = True,
+):
+    """Print the complete agent integration guide as structured JSON.
+
+    Returns a comprehensive guide covering all commands, workflows,
+    ref syntax, response format, error codes, and examples.
+    Designed for AI agent onboarding — run this first when working
+    with an unfamiliar workbook or learning the CLI.
+
+    Example: `xl guide`
+    """
+    guide_data = {
+        "overview": (
+            "xl is an agent-first CLI for reading, transforming, and validating "
+            "Excel workbooks (.xlsx/.xlsm). It provides a transactional "
+            "spreadsheet execution layer with JSON outputs, patch plans, "
+            "dry-run/validation, and safety rails."
+        ),
+        "workflow": {
+            "description": "The recommended workflow for safe workbook mutations.",
+            "steps": [
+                {"step": 1, "command": "xl wb inspect -f <file>", "purpose": "Discover sheets, tables, named ranges, fingerprint"},
+                {"step": 2, "command": "xl table ls -f <file>", "purpose": "List tables with columns and row counts"},
+                {"step": 3, "command": "xl plan add-column -f <file> -t <table> -n <col> --formula <formula>", "purpose": "Generate a patch plan (non-mutating)"},
+                {"step": 4, "command": "xl validate plan -f <file> --plan plan.json", "purpose": "Validate plan against workbook"},
+                {"step": 5, "command": "xl apply -f <file> --plan plan.json --dry-run", "purpose": "Preview changes without writing"},
+                {"step": 6, "command": "xl apply -f <file> --plan plan.json --backup", "purpose": "Apply changes with backup"},
+                {"step": 7, "command": "xl verify assert -f <file> --assertions <json>", "purpose": "Confirm expected state"},
+            ],
+        },
+        "commands": {
+            "inspection": {
+                "xl wb inspect": "Discover workbook structure — sheets, tables, named ranges, fingerprint",
+                "xl wb lock-status": "Check if file is locked by another process",
+                "xl sheet ls": "List all sheets with dimensions",
+                "xl table ls": "List all tables with columns and row counts",
+            },
+            "reading": {
+                "xl cell get": "Read a single cell value, type, and formula",
+                "xl range stat": "Compute statistics (min, max, mean, sum, count, stddev) for a range",
+                "xl query": "Query table data using SQL via DuckDB",
+                "xl formula find": "Search formulas by regex pattern",
+                "xl formula lint": "Lint formulas for common issues",
+            },
+            "plan_generation": {
+                "xl plan add-column": "Generate a plan to add a table column (non-mutating)",
+                "xl plan set-cells": "Generate a plan to set cell values (non-mutating)",
+                "xl plan format": "Generate a plan for number formatting (non-mutating)",
+                "xl plan compose": "Merge multiple plan files into one",
+                "xl plan show": "Display a plan's contents",
+            },
+            "validation": {
+                "xl validate workbook": "Check workbook health",
+                "xl validate plan": "Validate a plan against a workbook (fingerprint, tables, columns)",
+                "xl validate refs": "Verify a cell/range reference is valid",
+            },
+            "mutation": {
+                "xl apply": "Apply a patch plan to a workbook (supports --dry-run and --backup)",
+                "xl cell set": "Set a single cell value",
+                "xl table add-column": "Add a column to an Excel table",
+                "xl table append-rows": "Append rows to an Excel table",
+                "xl formula set": "Set a formula on a cell, range, or table column",
+                "xl format number": "Apply number format to a range or table column",
+                "xl format width": "Set column widths",
+                "xl format freeze": "Freeze or unfreeze panes",
+                "xl range clear": "Clear cell contents and/or formatting",
+            },
+            "verification": {
+                "xl verify assert": "Run post-apply assertions (table.column_exists, cell.value_equals, etc.)",
+                "xl diff compare": "Compare two workbook files cell by cell",
+            },
+            "automation": {
+                "xl run": "Execute a multi-step YAML workflow",
+                "xl serve --stdio": "Start stdio server for agent tool integration (MCP/ACP)",
+            },
+        },
+        "ref_syntax": {
+            "description": "Reference formats used by cell, range, formula, and format commands.",
+            "formats": [
+                {"pattern": "SheetName!CellRef", "example": "Sheet1!B2", "usage": "Single cell (cell get/set)"},
+                {"pattern": "SheetName!Start:End", "example": "Sheet1!A1:D10", "usage": "Cell range (range stat/clear, formula set)"},
+                {"pattern": "TableName[ColumnName]", "example": "Sales[Revenue]", "usage": "Table column (formula set, format number)"},
+                {"pattern": "=[@ColumnName]", "example": "=[@Revenue]-[@Cost]", "usage": "Structured ref inside table formulas"},
+            ],
+        },
+        "response_format": {
+            "description": "Every command returns a JSON ResponseEnvelope.",
+            "fields": {
+                "ok": "bool — true if command succeeded",
+                "command": "string — command identifier (e.g. 'table.ls')",
+                "target": "object — {file, sheet, table, ref} identifying the target",
+                "result": "any — command-specific payload",
+                "changes": "array — list of ChangeRecord objects describing mutations",
+                "warnings": "array — non-fatal issues [{code, message}]",
+                "errors": "array — error details [{code, message, details}]",
+                "metrics": "object — {duration_ms: int}",
+                "recalc": "object — {mode: 'cached', performed: false}",
+            },
+            "parsing_rules": [
+                "Check 'ok' first — false means the command failed",
+                "Read errors[0].code for machine-readable error category",
+                "Check warnings[] for non-fatal issues",
+                "Use result for the command-specific data",
+                "Use the process exit code for scripting (0=success, non-zero=error)",
+            ],
+        },
+        "error_codes": {
+            "ERR_WORKBOOK_NOT_FOUND": "File does not exist (exit 50)",
+            "ERR_TABLE_NOT_FOUND": "Named table not found in workbook (exit 50)",
+            "ERR_RANGE_INVALID": "Reference format is invalid or sheet not found (exit 10)",
+            "ERR_SCHEMA_MISMATCH": "Row data columns don't match table schema (exit 10)",
+            "ERR_FORMULA_OVERWRITE_BLOCKED": "Cell contains a formula; use --force-overwrite-formulas (exit 30)",
+            "ERR_FORMULA_BLOCKED": "Formula write blocked by safety check (exit 30)",
+            "ERR_PLAN_INVALID": "Plan JSON cannot be parsed (exit 10)",
+            "ERR_PLAN_FINGERPRINT_CONFLICT": "Workbook changed since plan was created (exit 40)",
+            "ERR_VALIDATION_FAILED": "Plan validation checks failed (exit 10)",
+            "ERR_LOCK_HELD": "File is locked by another process (exit 50)",
+            "ERR_MISSING_DATA": "Required data argument not provided (exit 10)",
+            "ERR_MISSING_PARAM": "Required parameter not provided (exit 10)",
+            "ERR_QUERY_FAILED": "SQL query execution failed (exit 90)",
+            "ERR_OPERATION_FAILED": "Plan operation failed during apply (exit 90)",
+            "ERR_PROTECTED_RANGE": "Range is protected by policy (exit 20)",
+        },
+        "exit_codes": {
+            "0": "Success",
+            "10": "Validation error (bad input, schema mismatch, invalid plan)",
+            "20": "Protection/permission error (protected range or sheet)",
+            "30": "Formula error (overwrite blocked, parse failure)",
+            "40": "Conflict (fingerprint mismatch — workbook changed)",
+            "50": "IO error (file not found, locked, permission denied)",
+            "90": "Internal error (unexpected failure)",
+        },
+        "safety": {
+            "dry_run": "All mutating commands support --dry-run to preview changes without writing",
+            "backup": "All mutating commands support --backup to create a timestamped .bak copy",
+            "fingerprint": "Patch plans record the workbook's xxhash; apply rejects if the file changed",
+            "formula_protection": "cell set and formula set refuse to overwrite formulas unless --force-overwrite-formulas is used",
+            "policy": "An optional xl-policy.yaml can restrict protected sheets, ranges, and mutation thresholds",
+        },
+        "examples": [
+            {
+                "name": "Add a calculated column to a table",
+                "steps": [
+                    "xl wb inspect -f budget.xlsx",
+                    "xl table ls -f budget.xlsx",
+                    "xl plan add-column -f budget.xlsx -t Sales -n GrossMarginPct --formula \"=[@GrossMargin]/[@Revenue]\"",
+                    "xl validate plan -f budget.xlsx --plan plan.json",
+                    "xl apply -f budget.xlsx --plan plan.json --dry-run",
+                    "xl apply -f budget.xlsx --plan plan.json --backup",
+                    "xl verify assert -f budget.xlsx --assertions '[{\"type\":\"table.column_exists\",\"table\":\"Sales\",\"column\":\"GrossMarginPct\"}]'",
+                ],
+            },
+            {
+                "name": "Query and analyze table data",
+                "steps": [
+                    "xl table ls -f sales.xlsx",
+                    "xl query -f sales.xlsx --sql \"SELECT Region, SUM(Revenue) as Total FROM Sales GROUP BY Region ORDER BY Total DESC\"",
+                    "xl range stat -f sales.xlsx --ref \"Sheet1!C2:C100\"",
+                ],
+            },
+            {
+                "name": "Format and freeze a report",
+                "steps": [
+                    "xl format number -f report.xlsx --ref \"Sales[Revenue]\" --style currency --decimals 2",
+                    "xl format number -f report.xlsx --ref \"Sales[GrossMarginPct]\" --style percent --decimals 1",
+                    "xl format width -f report.xlsx --sheet Sheet1 --columns A,B,C,D --width 15",
+                    "xl format freeze -f report.xlsx --sheet Sheet1 --ref B2",
+                ],
+            },
+            {
+                "name": "Compare workbooks before and after changes",
+                "steps": [
+                    "xl diff compare --file-a original.xlsx --file-b modified.xlsx",
+                ],
+            },
+        ],
+    }
+    env = success_envelope("guide", guide_data)
     _emit(env)
 
 
@@ -98,7 +515,17 @@ def wb_inspect(
     file: FilePath,
     json_out: JsonFlag = True,
 ):
-    """Inspect workbook metadata."""
+    """Inspect workbook metadata — sheets, tables, named ranges, fingerprint.
+
+    Returns the full structure of a workbook: sheet names and dimensions,
+    all Excel tables with columns and row counts, named ranges, and a
+    fingerprint hash for conflict detection. Start here when working
+    with an unfamiliar workbook.
+
+    Example: `xl wb inspect -f data.xlsx`
+
+    See also: `xl sheet ls`, `xl table ls` for focused listing.
+    """
     with Timer() as t:
         try:
             ctx = _load_ctx(file)
@@ -127,7 +554,12 @@ def sheet_ls(
     file: FilePath,
     json_out: JsonFlag = True,
 ):
-    """List sheets in a workbook."""
+    """List all sheets in a workbook with name, index, and dimensions.
+
+    Use this to discover valid sheet names for ref syntax (`SheetName!A1`).
+
+    Example: `xl sheet ls -f data.xlsx`
+    """
     with Timer() as t:
         try:
             ctx = _load_ctx(file)
@@ -155,7 +587,15 @@ def table_ls(
     sheet: SheetOpt = None,
     json_out: JsonFlag = True,
 ):
-    """List tables in a workbook."""
+    """List all Excel tables with columns, row counts, and sheet locations.
+
+    Returns table name, sheet, cell range, column names, and row count for
+    each table. Use `--sheet` to filter to a single sheet.
+
+    Example: `xl table ls -f data.xlsx`
+
+    Example: `xl table ls -f data.xlsx --sheet Revenue`
+    """
     with Timer() as t:
         try:
             ctx = _load_ctx(file)
@@ -180,15 +620,27 @@ def table_ls(
 @table_app.command("add-column")
 def table_add_column_cmd(
     file: FilePath,
-    table: Annotated[str, typer.Option("--table", "-t", help="Table name")],
-    name: Annotated[str, typer.Option("--name", "-n", help="New column name")],
-    formula: Annotated[Optional[str], typer.Option("--formula", help="Column formula")] = None,
-    default_value: Annotated[Optional[str], typer.Option("--default", help="Default value")] = None,
-    backup: Annotated[bool, typer.Option("--backup", help="Create backup")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview only")] = False,
+    table: Annotated[str, typer.Option("--table", "-t", help="Table name (as shown by 'xl table ls')")],
+    name: Annotated[str, typer.Option("--name", "-n", help="New column name to add")],
+    formula: Annotated[Optional[str], typer.Option("--formula", help="Column formula using structured refs (e.g. '=[@Revenue]-[@Cost]')")] = None,
+    default_value: Annotated[Optional[str], typer.Option("--default", help="Default static value to fill in all rows")] = None,
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
     json_out: JsonFlag = True,
 ):
-    """Add a column to an Excel table."""
+    """Add a new column to an Excel table. Mutating.
+
+    Appends a column to the right of existing columns. Use `--formula` for
+    calculated columns with structured refs (`=[@ColName]`). Use `--default`
+    for a static fill value. Provide both `--formula` and `--default` to set
+    a formula with a fallback.
+
+    Example: `xl table add-column -f data.xlsx -t Sales -n Margin --formula "=[@Revenue]-[@Cost]"`
+
+    Example: `xl table add-column -f data.xlsx -t Sales -n Status --default "Active" --dry-run`
+
+    See also: `xl plan add-column` to generate a plan instead of mutating directly.
+    """
     from xl.adapters.openpyxl_engine import table_add_column
     from xl.io.fileops import backup as make_backup
 
@@ -233,15 +685,24 @@ def table_add_column_cmd(
 @table_app.command("append-rows")
 def table_append_rows_cmd(
     file: FilePath,
-    table: Annotated[str, typer.Option("--table", "-t", help="Table name")],
-    data: Annotated[Optional[str], typer.Option("--data", help="Inline JSON array of row objects")] = None,
-    data_file: Annotated[Optional[str], typer.Option("--data-file", help="Path to JSON file with rows")] = None,
-    schema_mode: Annotated[str, typer.Option("--schema-mode", help="strict|allow-missing-null|map-by-header")] = "strict",
-    backup: Annotated[bool, typer.Option("--backup", help="Create backup")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview only")] = False,
+    table: Annotated[str, typer.Option("--table", "-t", help="Table name (as shown by 'xl table ls')")],
+    data: Annotated[Optional[str], typer.Option("--data", help="Inline JSON array of row objects, e.g. '[{\"Col1\":\"val\"}]'")] = None,
+    data_file: Annotated[Optional[str], typer.Option("--data-file", help="Path to JSON file containing an array of row objects")] = None,
+    schema_mode: Annotated[str, typer.Option("--schema-mode", help="'strict' (exact match), 'allow-missing-null' (missing cols→null), 'map-by-header' (match by name)")] = "strict",
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
     json_out: JsonFlag = True,
 ):
-    """Append rows to an Excel table."""
+    """Append rows to an Excel table. Mutating.
+
+    Provide row data as inline JSON (`--data`) or from a file (`--data-file`).
+    Each row is an object with column names as keys. The `--schema-mode`
+    controls how column mismatches are handled.
+
+    Example: `xl table append-rows -f data.xlsx -t Sales --data '[{"Revenue":100,"Cost":60}]'`
+
+    Example: `xl table append-rows -f data.xlsx -t Sales --data-file rows.json --schema-mode allow-missing-null`
+    """
     from xl.adapters.openpyxl_engine import table_append_rows
 
     # Parse row data
@@ -294,15 +755,26 @@ def table_append_rows_cmd(
 @cell_app.command("set")
 def cell_set_cmd(
     file: FilePath,
-    ref: Annotated[str, typer.Option("--ref", help="Cell reference (e.g. Sheet1!B2)")],
-    value: Annotated[str, typer.Option("--value", help="Value to set")],
-    cell_type: Annotated[Optional[str], typer.Option("--type", help="number|text|bool")] = None,
-    force_overwrite_formulas: Annotated[bool, typer.Option("--force-overwrite-formulas")] = False,
-    backup: Annotated[bool, typer.Option("--backup")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    ref: Annotated[str, typer.Option("--ref", help="Cell reference as SheetName!Cell (e.g. Sheet1!B2)")],
+    value: Annotated[str, typer.Option("--value", help="Value to write (coerced according to --type)")],
+    cell_type: Annotated[Optional[str], typer.Option("--type", help="Value type: 'number', 'text', or 'bool'")] = None,
+    force_overwrite_formulas: Annotated[bool, typer.Option("--force-overwrite-formulas", help="Allow overwriting a cell that contains a formula")] = False,
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
     json_out: JsonFlag = True,
 ):
-    """Set a cell value."""
+    """Set a cell value. Mutating.
+
+    Writes a value to a single cell. The `--type` flag controls coercion:
+    `number` parses as float/int, `bool` parses true/false/1/0, `text` keeps as string.
+    Refuses to overwrite a formula unless `--force-overwrite-formulas` is set.
+
+    Example: `xl cell set -f data.xlsx --ref "Sheet1!B2" --value 42 --type number`
+
+    Example: `xl cell set -f data.xlsx --ref "Sheet1!A1" --value "Hello" --type text --backup`
+
+    See also: `xl cell get` to read, `xl plan set-cells` to generate a plan instead.
+    """
     from xl.adapters.openpyxl_engine import cell_set
 
     # Parse sheet!ref
@@ -367,7 +839,13 @@ def validate_workbook_cmd(
     file: FilePath,
     json_out: JsonFlag = True,
 ):
-    """Validate workbook health."""
+    """Validate workbook health — check for corruption, broken refs, issues.
+
+    Returns a list of checks with pass/fail status. Use this to verify a
+    workbook is in good shape before performing operations.
+
+    Example: `xl validate workbook -f data.xlsx`
+    """
     from xl.validation.validators import validate_workbook
 
     with Timer() as t:
@@ -394,10 +872,19 @@ def validate_workbook_cmd(
 @validate_app.command("plan")
 def validate_plan_cmd(
     file: FilePath,
-    plan_path: Annotated[str, typer.Option("--plan", help="Path to plan JSON file")],
+    plan_path: Annotated[str, typer.Option("--plan", help="Path to plan JSON file (generated by 'xl plan' commands)")],
     json_out: JsonFlag = True,
 ):
-    """Validate a patch plan against a workbook."""
+    """Validate a patch plan against a workbook before applying.
+
+    Checks fingerprint match, table/column existence, and schema compatibility.
+    Returns `ok: false` with detailed error checks if validation fails.
+    Always run this before `xl apply`.
+
+    Example: `xl validate plan -f data.xlsx --plan plan.json`
+
+    See also: `xl apply --dry-run` for a preview of actual changes.
+    """
     from xl.validation.validators import validate_plan
 
     try:
@@ -444,10 +931,15 @@ def _err_from_check(check: dict) -> Any:
 # ---------------------------------------------------------------------------
 @plan_app.command("show")
 def plan_show(
-    plan_path: Annotated[str, typer.Option("--plan", help="Path to plan JSON file")],
+    plan_path: Annotated[str, typer.Option("--plan", help="Path to plan JSON file (generated by 'xl plan' commands)")],
     json_out: JsonFlag = True,
 ):
-    """Display a patch plan."""
+    """Display the contents of a patch plan — operations, preconditions, target.
+
+    Example: `xl plan show --plan plan.json`
+
+    See also: `xl validate plan` to check the plan against a workbook.
+    """
     try:
         plan_data = json.loads(Path(plan_path).read_text())
         plan = PatchPlan(**plan_data)
@@ -466,14 +958,22 @@ def plan_show(
 @plan_app.command("add-column")
 def plan_add_column(
     file: FilePath,
-    table: Annotated[str, typer.Option("--table", "-t", help="Table name")],
-    name: Annotated[str, typer.Option("--name", "-n", help="Column name")],
-    formula: Annotated[Optional[str], typer.Option("--formula")] = None,
-    default_value: Annotated[Optional[str], typer.Option("--default")] = None,
-    append: Annotated[Optional[str], typer.Option("--append", help="Append to existing plan file")] = None,
+    table: Annotated[str, typer.Option("--table", "-t", help="Table name (as shown by 'xl table ls')")],
+    name: Annotated[str, typer.Option("--name", "-n", help="New column name to add")],
+    formula: Annotated[Optional[str], typer.Option("--formula", help="Column formula using structured refs (e.g. '=[@Col1]+[@Col2]')")] = None,
+    default_value: Annotated[Optional[str], typer.Option("--default", help="Default static value to fill in all rows")] = None,
+    append: Annotated[Optional[str], typer.Option("--append", help="Path to existing plan file to append this operation to")] = None,
     json_out: JsonFlag = True,
 ):
-    """Generate a plan to add a column to a table."""
+    """Generate a plan to add a column to a table. Non-mutating.
+
+    Outputs a patch plan JSON to stdout (does not modify the workbook).
+    Use `--append` to add to an existing plan file for multi-step plans.
+
+    Example: `xl plan add-column -f data.xlsx -t Sales -n Margin --formula "=[@Revenue]-[@Cost]"`
+
+    See also: `xl table add-column` to apply directly, `xl apply` to execute this plan.
+    """
     from xl.io.fileops import fingerprint
 
     fp = fingerprint(file) if Path(file).exists() else None
@@ -515,12 +1015,19 @@ def plan_add_column(
 @plan_app.command("set-cells")
 def plan_set_cells(
     file: FilePath,
-    ref: Annotated[str, typer.Option("--ref", help="Cell ref (Sheet!A1)")],
-    value: Annotated[str, typer.Option("--value", help="Value")],
-    cell_type: Annotated[Optional[str], typer.Option("--type")] = None,
+    ref: Annotated[str, typer.Option("--ref", help="Cell reference as SheetName!Cell (e.g. Sheet1!B2)")],
+    value: Annotated[str, typer.Option("--value", help="Value to set (coerced according to --type)")],
+    cell_type: Annotated[Optional[str], typer.Option("--type", help="Value type: 'number', 'text', or 'bool'")] = None,
     json_out: JsonFlag = True,
 ):
-    """Generate a plan to set cell values."""
+    """Generate a plan to set cell values. Non-mutating.
+
+    Outputs a patch plan JSON to stdout (does not modify the workbook).
+
+    Example: `xl plan set-cells -f data.xlsx --ref "Sheet1!B2" --value 42 --type number`
+
+    See also: `xl cell set` to apply directly.
+    """
     from xl.io.fileops import fingerprint
 
     fp = fingerprint(file) if Path(file).exists() else None
@@ -564,13 +1071,21 @@ def plan_set_cells(
 @plan_app.command("format")
 def plan_format(
     file: FilePath,
-    ref: Annotated[str, typer.Option("--ref", help="Range ref or TableName[Column]")],
-    style: Annotated[str, typer.Option("--style", help="number|percent|currency|date")] = "number",
-    decimals: Annotated[int, typer.Option("--decimals")] = 2,
-    append: Annotated[Optional[str], typer.Option("--append", help="Append to existing plan file")] = None,
+    ref: Annotated[str, typer.Option("--ref", help="Range as Sheet!A1:D10 or table column as TableName[Column]")],
+    style: Annotated[str, typer.Option("--style", help="Format style: number, percent, currency, or date")] = "number",
+    decimals: Annotated[int, typer.Option("--decimals", help="Decimal places (default: 2)")] = 2,
+    append: Annotated[Optional[str], typer.Option("--append", help="Path to existing plan file to append this operation to")] = None,
     json_out: JsonFlag = True,
 ):
-    """Generate a plan for number formatting."""
+    """Generate a plan for number formatting. Non-mutating.
+
+    Outputs a patch plan JSON to stdout (does not modify the workbook).
+    Use `--append` to add to an existing plan file for multi-step plans.
+
+    Example: `xl plan format -f data.xlsx --ref "Sales[Revenue]" --style currency --decimals 2`
+
+    See also: `xl format number` to apply directly.
+    """
     from xl.io.fileops import fingerprint
 
     fp = fingerprint(file) if Path(file).exists() else None
@@ -604,10 +1119,18 @@ def plan_format(
 # ---------------------------------------------------------------------------
 @plan_app.command("compose")
 def plan_compose(
-    plans: Annotated[list[str], typer.Option("--plan", help="Plan files to merge")],
+    plans: Annotated[list[str], typer.Option("--plan", help="Plan files to merge (repeat --plan for each file)")],
     json_out: JsonFlag = True,
 ):
-    """Merge multiple plan files into one."""
+    """Merge multiple plan files into a single composed plan.
+
+    Combines operations, preconditions, and postconditions from all input
+    plans. The target file and fingerprint are taken from the first plan.
+
+    Example: `xl plan compose --plan step1.json --plan step2.json --plan step3.json`
+
+    See also: `xl plan add-column --append` to build plans incrementally.
+    """
     merged_ops: list[Operation] = []
     merged_pre: list[Precondition] = []
     merged_post: list[Postcondition] = []
@@ -643,12 +1166,25 @@ def plan_compose(
 @app.command("apply")
 def apply_cmd(
     file: FilePath,
-    plan_path: Annotated[str, typer.Option("--plan", help="Path to plan JSON file")],
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview without applying")] = False,
-    do_backup: Annotated[bool, typer.Option("--backup/--no-backup", help="Create backup before applying")] = True,
+    plan_path: Annotated[str, typer.Option("--plan", help="Path to plan JSON file (generated by 'xl plan' commands)")],
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview all changes without writing to disk")] = False,
+    do_backup: Annotated[bool, typer.Option("--backup/--no-backup", help="Create timestamped .bak copy before writing (default: on)")] = True,
     json_out: JsonFlag = True,
 ):
-    """Apply a patch plan to a workbook."""
+    """Apply a patch plan to a workbook. Mutating.
+
+    Executes all operations in the plan against the workbook. Validates
+    the plan first (fingerprint, preconditions). Use `--dry-run` to preview
+    changes, then apply for real. Backup is on by default.
+
+    Example (preview): `xl apply -f data.xlsx --plan plan.json --dry-run`
+
+    Example (apply): `xl apply -f data.xlsx --plan plan.json --backup`
+
+    Workflow: `xl plan ...` → `xl validate plan` → `xl apply --dry-run` → `xl apply`
+
+    See also: `xl validate plan` to check before applying, `xl verify assert` to check after.
+    """
     from xl.adapters.openpyxl_engine import (
         cell_set,
         format_number,
@@ -786,13 +1322,24 @@ def apply_cmd(
 @app.command("query")
 def query_cmd(
     file: FilePath,
-    sql: Annotated[Optional[str], typer.Option("--sql", help="SQL query")] = None,
-    table: Annotated[Optional[str], typer.Option("--table", "-t", help="Table name")] = None,
-    where: Annotated[Optional[str], typer.Option("--where", help="WHERE clause")] = None,
-    select: Annotated[Optional[str], typer.Option("--select", help="Comma-separated columns")] = None,
+    sql: Annotated[Optional[str], typer.Option("--sql", help="Full SQL query (all Excel tables are loaded as DuckDB tables by name)")] = None,
+    table: Annotated[Optional[str], typer.Option("--table", "-t", help="Table name for shorthand mode (builds SELECT for you)")] = None,
+    where: Annotated[Optional[str], typer.Option("--where", help="WHERE clause for shorthand mode (e.g. \"Revenue > 1000\")")] = None,
+    select: Annotated[Optional[str], typer.Option("--select", help="Comma-separated column names for shorthand (default: all)")] = None,
     json_out: JsonFlag = True,
 ):
-    """Query table data using SQL (via DuckDB)."""
+    """Query table data using SQL via DuckDB.
+
+    All Excel tables in the workbook are loaded into DuckDB by their table
+    name. Use `--sql` for full SQL, or `--table` + `--where` + `--select`
+    for a shorthand query builder.
+
+    Example (full SQL): `xl query -f data.xlsx --sql "SELECT Region, SUM(Sales) FROM Sales GROUP BY Region"`
+
+    Example (shorthand): `xl query -f data.xlsx -t Sales --select "Region,Revenue" --where "Revenue > 1000"`
+
+    See also: `xl table ls` to discover available table names.
+    """
     import duckdb
 
     with Timer() as t:
@@ -882,11 +1429,21 @@ def query_cmd(
 @cell_app.command("get")
 def cell_get_cmd(
     file: FilePath,
-    ref: Annotated[str, typer.Option("--ref", help="Cell reference (e.g. Sheet1!B2)")],
-    data_only: Annotated[bool, typer.Option("--data-only", help="Read cached formula values")] = False,
+    ref: Annotated[str, typer.Option("--ref", help="Cell reference as SheetName!Cell (e.g. Sheet1!B2)")],
+    data_only: Annotated[bool, typer.Option("--data-only", help="Return last-cached value for formula cells instead of the formula")] = False,
     json_out: JsonFlag = True,
 ):
-    """Read a cell value."""
+    """Read a single cell's value, type, and formula.
+
+    Returns the cell value, data type, and formula (if any). Use `--data-only`
+    to get the last-computed value of formula cells rather than the formula text.
+
+    Example: `xl cell get -f data.xlsx --ref "Sheet1!B2"`
+
+    Example: `xl cell get -f data.xlsx --ref "Sheet1!B2" --data-only`
+
+    See also: `xl cell set` to write, `xl range stat` for aggregate stats.
+    """
     from xl.adapters.openpyxl_engine import cell_get
 
     if "!" not in ref:
@@ -923,11 +1480,18 @@ def cell_get_cmd(
 @range_app.command("stat")
 def range_stat_cmd(
     file: FilePath,
-    ref: Annotated[str, typer.Option("--ref", help="Range reference (e.g. Sheet1!A1:D10)")],
-    data_only: Annotated[bool, typer.Option("--data-only")] = False,
+    ref: Annotated[str, typer.Option("--ref", help="Range reference as SheetName!Start:End (e.g. Sheet1!C2:C100)")],
+    data_only: Annotated[bool, typer.Option("--data-only", help="Use last-cached values for formula cells")] = False,
     json_out: JsonFlag = True,
 ):
-    """Compute statistics for a range."""
+    """Compute statistics for a cell range — min, max, mean, sum, count, stddev.
+
+    Returns descriptive statistics for all numeric values in the range.
+
+    Example: `xl range stat -f data.xlsx --ref "Sheet1!C2:C100"`
+
+    See also: `xl query` for more complex aggregations via SQL.
+    """
     from xl.adapters.openpyxl_engine import range_stat
 
     if "!" not in ref:
@@ -958,15 +1522,23 @@ def range_stat_cmd(
 @range_app.command("clear")
 def range_clear_cmd(
     file: FilePath,
-    ref: Annotated[str, typer.Option("--ref", help="Range reference (e.g. Sheet1!A1:D10)")],
-    contents: Annotated[bool, typer.Option("--contents", help="Clear values and formulas")] = True,
-    formats: Annotated[bool, typer.Option("--formats", help="Clear formatting")] = False,
-    clear_all: Annotated[bool, typer.Option("--all", help="Clear contents and formats")] = False,
-    backup: Annotated[bool, typer.Option("--backup")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    ref: Annotated[str, typer.Option("--ref", help="Range reference as SheetName!Start:End (e.g. Sheet1!A1:D10)")],
+    contents: Annotated[bool, typer.Option("--contents", help="Clear values and formulas (default: on)")] = True,
+    formats: Annotated[bool, typer.Option("--formats", help="Clear number/style formatting")] = False,
+    clear_all: Annotated[bool, typer.Option("--all", help="Clear both contents and formatting")] = False,
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
     json_out: JsonFlag = True,
 ):
-    """Clear a range of cells."""
+    """Clear a range of cells — values, formulas, and/or formatting. Mutating.
+
+    By default clears cell contents (values and formulas). Use `--formats` to
+    clear formatting, or `--all` for both.
+
+    Example: `xl range clear -f data.xlsx --ref "Sheet1!A1:D10" --contents`
+
+    Example: `xl range clear -f data.xlsx --ref "Sheet1!A1:D10" --all --backup`
+    """
     from xl.adapters.openpyxl_engine import range_clear
 
     if "!" not in ref:
@@ -1010,15 +1582,30 @@ def range_clear_cmd(
 @formula_app.command("set")
 def formula_set_cmd(
     file: FilePath,
-    ref: Annotated[str, typer.Option("--ref", help="Cell/range ref (Sheet!A1 or Sheet!A1:A10 or Table[Col])")],
-    formula: Annotated[str, typer.Option("--formula", help="Formula to set")],
-    force_overwrite_values: Annotated[bool, typer.Option("--force-overwrite-values")] = False,
-    force_overwrite_formulas: Annotated[bool, typer.Option("--force-overwrite-formulas")] = False,
-    backup: Annotated[bool, typer.Option("--backup")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    ref: Annotated[str, typer.Option("--ref", help="Target: Sheet!A1, Sheet!A1:A10 (range fill), or TableName[Column]")],
+    formula: Annotated[str, typer.Option("--formula", help="Excel formula (e.g. '=C2-D2' or '=[@Revenue]-[@Cost]')")],
+    force_overwrite_values: Annotated[bool, typer.Option("--force-overwrite-values", help="Allow overwriting cells that contain plain values")] = False,
+    force_overwrite_formulas: Annotated[bool, typer.Option("--force-overwrite-formulas", help="Allow overwriting cells that already contain formulas")] = False,
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
     json_out: JsonFlag = True,
 ):
-    """Set a formula on a cell, range, or table column."""
+    """Set a formula on a cell, range, or table column. Mutating.
+
+    Supports three ref types:
+    - Single cell: `Sheet1!E2` — sets formula on one cell
+    - Range: `Sheet1!E2:E100` — fills the formula down the range
+    - Table column: `Sales[Margin]` — fills all data rows in the column
+
+    Safety: refuses to overwrite existing values or formulas unless the
+    corresponding `--force-overwrite-*` flag is set.
+
+    Example: `xl formula set -f data.xlsx --ref "Sheet1!E2" --formula "=C2-D2"`
+
+    Example: `xl formula set -f data.xlsx --ref "Sales[Margin]" --formula "=[@Revenue]-[@Cost]"`
+
+    See also: `xl formula lint` to check formula health, `xl formula find` to search.
+    """
     from xl.adapters.openpyxl_engine import formula_set, resolve_table_column_ref
 
     with Timer() as t:
@@ -1076,7 +1663,14 @@ def formula_lint_cmd(
     sheet: SheetOpt = None,
     json_out: JsonFlag = True,
 ):
-    """Lint formulas for common issues."""
+    """Lint formulas for common issues — volatile functions, broken refs, anti-patterns.
+
+    Scans all formulas (or a single sheet with `--sheet`) and returns findings.
+
+    Example: `xl formula lint -f data.xlsx`
+
+    Example: `xl formula lint -f data.xlsx --sheet Revenue`
+    """
     from xl.adapters.openpyxl_engine import formula_lint
 
     with Timer() as t:
@@ -1101,11 +1695,19 @@ def formula_lint_cmd(
 @formula_app.command("find")
 def formula_find_cmd(
     file: FilePath,
-    pattern: Annotated[str, typer.Option("--pattern", help="Regex pattern to match")],
+    pattern: Annotated[str, typer.Option("--pattern", help="Regex pattern to match against formula text (e.g. 'VLOOKUP', 'SUM.*Revenue')")],
     sheet: SheetOpt = None,
     json_out: JsonFlag = True,
 ):
-    """Search formulas matching a pattern."""
+    """Search for formulas matching a regex pattern.
+
+    Scans all formulas (or a single sheet with `--sheet`) and returns matches
+    with cell location and formula text.
+
+    Example: `xl formula find -f data.xlsx --pattern "VLOOKUP"`
+
+    Example: `xl formula find -f data.xlsx --pattern "SUM" --sheet Revenue`
+    """
     from xl.adapters.openpyxl_engine import formula_find
 
     with Timer() as t:
@@ -1130,14 +1732,23 @@ def formula_find_cmd(
 @format_app.command("number")
 def format_number_cmd(
     file: FilePath,
-    ref: Annotated[str, typer.Option("--ref", help="Range ref (Sheet!A1:D10) or Table[Col]")],
-    style: Annotated[str, typer.Option("--style", help="number|percent|currency|date|text")] = "number",
-    decimals: Annotated[int, typer.Option("--decimals")] = 2,
-    backup: Annotated[bool, typer.Option("--backup")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    ref: Annotated[str, typer.Option("--ref", help="Range as Sheet!A1:D10 or table column as TableName[Column]")],
+    style: Annotated[str, typer.Option("--style", help="Format style: number, percent, currency, date, or text")] = "number",
+    decimals: Annotated[int, typer.Option("--decimals", help="Decimal places (default: 2)")] = 2,
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
     json_out: JsonFlag = True,
 ):
-    """Apply number format to a range."""
+    """Apply number format to a range or table column. Mutating.
+
+    Sets the display format for cells. Accepts both range refs and table column refs.
+
+    Example: `xl format number -f data.xlsx --ref "Sheet1!C2:C100" --style currency --decimals 2`
+
+    Example: `xl format number -f data.xlsx --ref "Sales[Revenue]" --style number --decimals 0`
+
+    See also: `xl plan format` to generate a plan instead of applying directly.
+    """
     from xl.adapters.openpyxl_engine import format_number, resolve_table_column_ref
 
     with Timer() as t:
@@ -1183,14 +1794,17 @@ def format_number_cmd(
 @format_app.command("width")
 def format_width_cmd(
     file: FilePath,
-    sheet: Annotated[str, typer.Option("--sheet", "-s", help="Sheet name")],
-    columns: Annotated[str, typer.Option("--columns", help="Columns (e.g. A,B,C)")],
-    width: Annotated[float, typer.Option("--width", help="Column width")],
-    backup: Annotated[bool, typer.Option("--backup")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    sheet: Annotated[str, typer.Option("--sheet", "-s", help="Sheet name (as shown by 'xl sheet ls')")],
+    columns: Annotated[str, typer.Option("--columns", help="Comma-separated column letters (e.g. A,B,C)")],
+    width: Annotated[float, typer.Option("--width", help="Column width in character units (Excel default is ~8.43)")],
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
     json_out: JsonFlag = True,
 ):
-    """Set column widths."""
+    """Set column widths on a sheet. Mutating.
+
+    Example: `xl format width -f data.xlsx --sheet Sheet1 --columns A,B,C --width 15`
+    """
     from xl.adapters.openpyxl_engine import format_width
 
     col_list = [c.strip() for c in columns.split(",")]
@@ -1227,14 +1841,22 @@ def format_width_cmd(
 @format_app.command("freeze")
 def format_freeze_cmd(
     file: FilePath,
-    sheet: Annotated[str, typer.Option("--sheet", "-s", help="Sheet name")],
-    ref: Annotated[Optional[str], typer.Option("--ref", help="Cell below/right of frozen area (e.g. B2)")] = None,
-    unfreeze: Annotated[bool, typer.Option("--unfreeze", help="Remove freeze")] = False,
-    backup: Annotated[bool, typer.Option("--backup")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    sheet: Annotated[str, typer.Option("--sheet", "-s", help="Sheet name (as shown by 'xl sheet ls')")],
+    ref: Annotated[Optional[str], typer.Option("--ref", help="Cell below/right of frozen area (e.g. B2 freezes row 1 and column A)")] = None,
+    unfreeze: Annotated[bool, typer.Option("--unfreeze", help="Remove all freeze panes from the sheet")] = False,
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
     json_out: JsonFlag = True,
 ):
-    """Freeze or unfreeze panes."""
+    """Freeze or unfreeze panes on a sheet. Mutating.
+
+    Freezing at B2 keeps row 1 and column A visible while scrolling.
+    Use `--unfreeze` to remove all freeze panes.
+
+    Example: `xl format freeze -f data.xlsx --sheet Sheet1 --ref B2`
+
+    Example: `xl format freeze -f data.xlsx --sheet Sheet1 --unfreeze`
+    """
     from xl.adapters.openpyxl_engine import format_freeze
 
     freeze_ref = None if unfreeze else ref
@@ -1275,10 +1897,16 @@ def format_freeze_cmd(
 @validate_app.command("refs")
 def validate_refs_cmd(
     file: FilePath,
-    ref: Annotated[str, typer.Option("--ref", help="Reference to validate (e.g. Sheet1!A1:D10)")],
+    ref: Annotated[str, typer.Option("--ref", help="Reference to validate as SheetName!Range (e.g. Sheet1!A1:D10)")],
     json_out: JsonFlag = True,
 ):
-    """Validate that a reference points to valid cells."""
+    """Validate that a reference points to a valid sheet and cell range.
+
+    Checks that the sheet exists and the range is valid. Useful before
+    running cell/range/formula commands to catch typos early.
+
+    Example: `xl validate refs -f data.xlsx --ref "Sheet1!A1:D10"`
+    """
     with Timer() as t:
         try:
             ctx = _load_ctx(file)
@@ -1315,7 +1943,13 @@ def wb_lock_status_cmd(
     file: FilePath,
     json_out: JsonFlag = True,
 ):
-    """Check if a workbook file is locked."""
+    """Check if a workbook file is locked by another process.
+
+    Returns lock status and lock holder info if available. Check this
+    before mutating operations to avoid ERR_LOCK_HELD errors.
+
+    Example: `xl wb lock-status -f data.xlsx`
+    """
     from xl.io.fileops import check_lock
 
     with Timer() as t:
@@ -1331,11 +1965,22 @@ def wb_lock_status_cmd(
 @verify_app.command("assert")
 def verify_assert_cmd(
     file: FilePath,
-    assertions: Annotated[Optional[str], typer.Option("--assertions", help="Inline JSON array of assertions")] = None,
-    assertions_file: Annotated[Optional[str], typer.Option("--assertions-file", help="Path to JSON file with assertions")] = None,
+    assertions: Annotated[Optional[str], typer.Option("--assertions", help="Inline JSON array of assertion objects (e.g. '[{\"type\":\"table.column_exists\",...}]')")] = None,
+    assertions_file: Annotated[Optional[str], typer.Option("--assertions-file", help="Path to JSON file containing an array of assertion objects")] = None,
     json_out: JsonFlag = True,
 ):
-    """Run post-apply assertions on a workbook."""
+    """Run post-apply assertions to verify workbook state.
+
+    Checks that the workbook matches expected conditions after mutations.
+    Returns `ok: false` if any assertion fails. Assertion types include
+    `table.column_exists`, `cell.value_equals`, `cell.not_empty`, `row_count.gte`.
+
+    Example: `xl verify assert -f data.xlsx --assertions '[{"type":"table.column_exists","table":"Sales","column":"Margin"}]'`
+
+    Example: `xl verify assert -f data.xlsx --assertions-file checks.json`
+
+    See also: `xl validate workbook` for structural health checks.
+    """
     from xl.engine.verify import run_assertions
 
     if assertions:
@@ -1371,12 +2016,22 @@ def verify_assert_cmd(
 # ---------------------------------------------------------------------------
 @diff_app.command("compare")
 def diff_compare_cmd(
-    file_a: Annotated[str, typer.Option("--file-a", help="First workbook")],
-    file_b: Annotated[str, typer.Option("--file-b", help="Second workbook")],
+    file_a: Annotated[str, typer.Option("--file-a", help="First (original/before) workbook path")],
+    file_b: Annotated[str, typer.Option("--file-b", help="Second (modified/after) workbook path")],
     sheet: SheetOpt = None,
     json_out: JsonFlag = True,
 ):
-    """Compare two workbook files."""
+    """Compare two workbook files cell by cell.
+
+    Returns cell-level value changes, sheets added/removed, and fingerprint
+    comparison. Use `--sheet` to limit comparison to a single sheet.
+
+    Example: `xl diff compare --file-a original.xlsx --file-b modified.xlsx`
+
+    Example: `xl diff compare --file-a v1.xlsx --file-b v2.xlsx --sheet Revenue`
+
+    Useful for reviewing changes after `xl apply`.
+    """
     from xl.diff.differ import diff_workbooks
 
     with Timer() as t:
@@ -1396,11 +2051,19 @@ def diff_compare_cmd(
 # ---------------------------------------------------------------------------
 @app.command("run")
 def run_cmd(
-    workflow_file: Annotated[str, typer.Option("--workflow", "-w", help="Path to YAML workflow file")],
-    file: Annotated[Optional[str], typer.Option("--file", "-f", help="Override target workbook")] = None,
+    workflow_file: Annotated[str, typer.Option("--workflow", "-w", help="Path to YAML workflow file defining steps to execute")],
+    file: Annotated[Optional[str], typer.Option("--file", "-f", help="Override the target workbook (instead of workflow's target.file)")] = None,
     json_out: JsonFlag = True,
 ):
-    """Execute a YAML workflow."""
+    """Execute a multi-step YAML workflow.
+
+    Runs a sequence of xl commands defined in a YAML file. The workflow
+    specifies a target workbook and a list of steps (plan, apply, verify, etc.).
+
+    Example: `xl run --workflow pipeline.yaml -f data.xlsx`
+
+    See also: `xl apply` for single-plan execution.
+    """
     from xl.engine.workflow import execute_workflow, load_workflow
 
     with Timer() as t:
@@ -1435,9 +2098,15 @@ def run_cmd(
 # ---------------------------------------------------------------------------
 @app.command("serve")
 def serve_cmd(
-    stdio: Annotated[bool, typer.Option("--stdio", help="Run in stdio server mode")] = True,
+    stdio: Annotated[bool, typer.Option("--stdio", help="Use stdin/stdout for JSON request/response (for agent tool integration)")] = True,
 ):
-    """Start machine server mode."""
+    """Start stdio server for agent tool integration (MCP/ACP).
+
+    Reads JSON commands from stdin and writes JSON responses to stdout.
+    Each line is a JSON object: `{"id": "1", "command": "wb.inspect", "args": {"file": "data.xlsx"}}`
+
+    Example: `xl serve --stdio`
+    """
     from xl.server.stdio import StdioServer
     server = StdioServer()
     server.run()

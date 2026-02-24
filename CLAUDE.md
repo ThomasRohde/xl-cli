@@ -67,6 +67,17 @@ uv run xl wb inspect --file workbook.xlsx
 uv run xl table ls --file workbook.xlsx
 ```
 
+## Agent Discovery
+
+To understand this CLI as a coding agent, use progressive discovery:
+
+1. `uv run xl guide` — full machine-readable orientation (structured JSON with all commands, workflows, ref syntax, error codes, examples)
+2. `uv run xl --help` — command group overview with workflow summary
+3. `uv run xl <group> --help` — group detail with epilog examples (e.g. `uv run xl table --help`)
+4. `uv run xl <group> <cmd> --help` — full command detail with usage examples and cross-references (e.g. `uv run xl table add-column --help`)
+
+**Recommended starting workflow:** `xl wb inspect` → `xl table ls` → `xl plan ...` → `xl validate plan` → `xl apply --dry-run` → `xl apply --backup` → `xl verify assert`
+
 ## Key Conventions
 
 - **Every command** returns a `ResponseEnvelope` JSON (see `contracts/common.py`)

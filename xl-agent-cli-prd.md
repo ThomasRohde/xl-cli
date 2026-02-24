@@ -748,37 +748,51 @@ Optional `--emit-events` streams lifecycle events:
 
 ## 25) Milestones (pragmatic implementation plan)
 
-### Milestone 0 — Foundation (1–2 weeks)
-- repo scaffold, uv/hatch, Typer app
-- response envelope + error taxonomy
-- basic `wb inspect`, `sheet ls`
+### Milestone 0 — Foundation ✅ COMPLETE
+- [x] repo scaffold, uv/hatch, Typer app
+- [x] response envelope + error taxonomy
+- [x] basic `wb inspect`, `sheet ls`
+- [x] `xl version`
+- [x] IO utilities: SHA-256 fingerprinting, atomic write, backup, lock detection
+- [x] Pydantic v2 contracts: ResponseEnvelope, Target, WorkbookMeta, SheetMeta, etc.
+- [x] Exit code taxonomy (0/10/20/30/40/50/60/70/90)
 
-### Milestone 1 — Table-first inspect/mutate (2–4 weeks)
-- `table ls`, `table add-column`, `table append-rows`
-- patch plan schema + `plan show`
-- `apply --dry-run`
+### Milestone 1 — Table-first inspect/mutate ✅ COMPLETE
+- [x] `table ls`, `table add-column`, `table append-rows`
+- [x] patch plan schema + `plan show`
+- [x] `plan add-column`, `plan set-cells`, `plan format`, `plan compose`
+- [x] `apply --dry-run` + `apply` with backup and fingerprint conflict detection
+- [x] `cell set` with formula overwrite protection
+- [x] `validate workbook` and `validate plan`
+- [x] `query` via DuckDB table extraction
+- [x] 49 tests passing (contracts, IO, context, adapter, validation, CLI integration)
 
-### Milestone 2 — Validation and safety (2–3 weeks)
-- policy file
-- fingerprint conflict checks
-- backup + atomic write
-- thresholds/protected ranges
+### Milestone 2 — Validation and safety (up next)
+- [ ] policy file (`xl-policy.yaml`)
+- [x] fingerprint conflict checks
+- [x] backup + atomic write
+- [ ] thresholds/protected ranges
+- [ ] mutation threshold enforcement
+- [ ] workbook hygiene warnings for hidden sheets / external links (basic detection done)
 
-### Milestone 3 — Formula + formatting + query (2–4 weeks)
-- `formula set`, `formula lint`
-- `format number`, freeze panes, widths
-- `query` via DuckDB extraction
+### Milestone 3 — Formula + formatting + query
+- [ ] `formula set` (standalone command)
+- [ ] `formula lint`
+- [ ] `formula find`
+- [x] `format number` (via adapter, used in plan apply)
+- [ ] freeze panes, column widths
+- [x] `query` via DuckDB extraction
 
-### Milestone 4 — Workflows + observability (2–3 weeks)
-- `xl run workflow.yaml`
-- event stream + trace artifacts
-- `serve --stdio` machine mode (optional but highly valuable)
+### Milestone 4 — Workflows + observability
+- [ ] `xl run workflow.yaml`
+- [ ] event stream + trace artifacts
+- [ ] `serve --stdio` machine mode (optional but highly valuable)
 
 ### Milestone 5 — Hardening (ongoing)
-- golden workbook fixtures
-- fuzz/property tests
-- performance tuning on large workbooks
-- docs + examples for agents
+- [ ] golden workbook fixtures
+- [ ] fuzz/property tests
+- [ ] performance tuning on large workbooks
+- [ ] docs + examples for agents
 
 ---
 

@@ -6,270 +6,344 @@ Implement the `xl` CLI as described in `xl-agent-cli-prd.md`. This is a Python-b
 
 ---
 
-## Phase 1: Foundation (Milestone 0)
+## Phase 1: Foundation (Milestone 0) — COMPLETE
 
-### Step 1.1 — Project scaffolding
-- Create `pyproject.toml` with hatchling build system, `uv` compatibility, Python 3.12+ requirement
-- Define dependencies: `openpyxl`, `typer`, `pydantic>=2`, `orjson`, `rich`, `pyyaml`, `duckdb`, `portalocker`, `xxhash`, `structlog`
-- Define dev dependencies: `pytest`, `pytest-xdist`, `hypothesis`
-- Configure CLI entrypoint: `xl = "xl.cli:app"`
-- Create `src/xl/__init__.py` with version
-
-### Step 1.2 — Source package structure
-Create the full module layout per PRD Section 27:
-```
-src/xl/
-├── __init__.py
-├── cli.py                  # Typer app + top-level command groups
-├── contracts/
-│   ├── __init__.py
-│   ├── common.py           # ResponseEnvelope, Target, Warning, Error, Metrics, RecalcInfo
-│   ├── responses.py        # Command-specific result models
-│   ├── plans.py            # PatchPlan, Operation, Precondition, Postcondition
-│   └── workflow.py         # WorkflowSpec, WorkflowStep
-├── engine/
-│   ├── __init__.py
-│   ├── context.py          # WorkbookContext (load, fingerprint, metadata)
-│   └── dispatcher.py       # Command dispatch + envelope wrapping
-├── adapters/
-│   ├── __init__.py
-│   ├── openpyxl_engine.py  # All openpyxl workbook operations
-│   ├── query_duckdb.py     # DuckDB SQL query adapter
-│   └── recalc/
-│       ├── __init__.py
-│       └── base.py         # Recalc strategy interface + cached/none modes
-├── validation/
-│   ├── __init__.py
-│   └── validators.py       # Reference, schema, protection, threshold validators
-├── diff/
-│   ├── __init__.py
-│   └── differ.py           # Workbook/patch diff logic
-├── io/
-│   ├── __init__.py
-│   └── fileops.py          # Locking, backup, fingerprint, atomic write
-├── observe/
-│   ├── __init__.py
-│   └── events.py           # Structured logging, event emission, trace support
-└── server/
-    ├── __init__.py
-    └── stdio.py            # stdio server mode
-```
-
-### Step 1.3 — Response envelope and error taxonomy
-- Implement `ResponseEnvelope` Pydantic model (Section 11): `ok`, `command`, `target`, `result`, `changes`, `warnings`, `errors`, `metrics`, `recalc`
-- Implement structured error codes and exit codes (Section 19)
-- Create `output_response()` helper using `orjson` for JSON, with `--json`/`--ndjson` flag support
-- Create `format_human()` helper using `rich` for default human-readable output
-
-### Step 1.4 — CLI framework + global flags
-- Set up Typer app in `cli.py` with command groups: `wb`, `sheet`, `table`, `range`, `cell`, `formula`, `format`, `query`, `validate`, `plan`, `apply`, `verify`, `diff`, `run`, `serve`, `version`
-- Implement global options callback: `--file`, `--json`, `--ndjson`, `--yaml`, `--quiet`, `--trace`, `--cwd`, `--config`, `--recalc`, `--fail-on-warning`, `--timeout`
-
-### Step 1.5 — Workbook context and fingerprinting
-- Implement `WorkbookContext` in `engine/context.py`: loads workbook via openpyxl, computes SHA-256 fingerprint, extracts basic metadata
-- Implement file fingerprinting in `io/fileops.py` using `hashlib` SHA-256
-
-### Step 1.6 — `xl wb inspect`
-- Return `WorkbookMeta` (Section 23): sheets (name, hidden state, dimensions), named ranges, external links presence, macros presence, calc mode, fingerprint
-- JSON output via envelope
-
-### Step 1.7 — `xl sheet ls`
-- Return list of `SheetMeta`: name, index, visibility, used range estimate, table count
-- JSON output via envelope
-
-### Step 1.8 — `xl version`
-- Return version string from package metadata
-
-### Step 1.9 — Test infrastructure
-- Create `tests/` directory with `conftest.py`
-- Create `tests/fixtures/workbooks/` with sample `.xlsx` files (simple workbook with sheets, tables, named ranges)
-- Write tests for `wb inspect` and `sheet ls` with golden output validation
+### Step 1.1 — Project scaffolding ✅
+### Step 1.2 — Source package structure ✅
+### Step 1.3 — Response envelope and error taxonomy ✅
+### Step 1.4 — CLI framework + global flags ✅
+### Step 1.5 — Workbook context and fingerprinting ✅
+### Step 1.6 — `xl wb inspect` ✅
+### Step 1.7 — `xl sheet ls` ✅
+### Step 1.8 — `xl version` ✅
+### Step 1.9 — Test infrastructure ✅
 
 ---
 
-## Phase 2: Table Operations + Patch Plans (Milestone 1)
+## Phase 2: Table Operations + Patch Plans (Milestone 1) — COMPLETE
 
-### Step 2.1 — `xl table ls`
-- List tables per Section 15: sheet, table name, range, columns (names/order), style, totals row presence
-- Implement `TableMeta` model (Section 23)
-
-### Step 2.2 — `xl table add-column`
-- Add column to Excel table via openpyxl
-- Support: static default value, formula, number format preset, insert position
-- Generate change record
-
-### Step 2.3 — `xl table append-rows`
-- Append rows from inline JSON or JSON file
-- Schema matching modes: strict (default), allow-missing-null, map-by-header
-- Validate row payloads against table column schema
-
-### Step 2.4 — Patch plan schema + `xl plan show`
-- Implement `PatchPlan` Pydantic model (Section 13): schema_version, plan_id, target, options, preconditions, operations, postconditions
-- Implement operation types: `table.add_column`, `table.append_rows`, `format.number`, `cell.set`, `range.clear`
-- `xl plan show` reads and pretty-prints a plan JSON file
-
-### Step 2.5 — Plan generators
-- `xl plan add-column` — generates patch plan for adding a table column
-- `xl plan set-cells` — generates patch plan for setting cell values
-- `xl plan format` — generates patch plan for formatting
-- `xl plan compose` — merges multiple plans
-- All generators support `--append` to extend existing plan files
-
-### Step 2.6 — `xl apply --dry-run` and `xl apply`
-- Parse and validate plan JSON
-- Check preconditions (sheet exists, table exists, etc.)
-- Fingerprint conflict detection
-- Dry-run mode: simulate changes, return projected change records without writing
-- Apply mode: execute operations, create backup if `--backup`, atomic write
-- Return change records in envelope
-
-### Step 2.7 — Tests for table operations and patch lifecycle
-- Test table ls, add-column, append-rows
-- Test full plan lifecycle: generate → show → validate → dry-run → apply
-- Golden output fixtures
+### Step 2.1 — `xl table ls` ✅
+### Step 2.2 — `xl table add-column` ✅
+### Step 2.3 — `xl table append-rows` ✅
+### Step 2.4 — Patch plan schema + `xl plan show` ✅
+### Step 2.5 — Plan generators ✅
+### Step 2.6 — `xl apply --dry-run` and `xl apply` ✅
+### Step 2.7 — Tests for table operations and patch lifecycle ✅
 
 ---
 
-## Phase 3: Validation and Safety (Milestone 2)
+## Phase 3: Formula + Cell/Range + Formatting (Milestone 3) — THIS SESSION
 
-### Step 3.1 — Validation framework
-- Implement validation categories (Section 16): reference, schema, protection, mutation thresholds, formula safety, concurrency/conflict, workbook hygiene
-- `xl validate workbook` — validates workbook health
-- `xl validate plan` — validates plan against workbook + policy
-- `xl validate refs` — validates specific references
+This phase fills out the remaining cell/range escape hatches, formula operations, and formatting commands from the PRD.
 
-### Step 3.2 — Policy engine
-- Load `xl-policy.yaml` configuration
-- Support: protected sheets/ranges, mutation thresholds, allowed commands, logging redaction rules
-- Integrate policy checks into apply/validate commands
+### Step 3.1 — `xl formula set`
 
-### Step 3.3 — File safety: locking, backups, atomic writes
-- `portalocker`-based file locking
-- Lock status detection: `xl wb lock-status`
-- Backup creation (timestamped `.bak` files)
-- Atomic write: temp file → fsync → replace
-- `--wait-lock` flag with timeout
+**File changes**: `src/xl/adapters/openpyxl_engine.py`, `src/xl/cli.py`
 
-### Step 3.4 — Fingerprint conflict detection
-- Compare fingerprint at plan generation time vs apply time
-- `--fail-on-external-change` flag (default true for plan apply)
-- Structured error on mismatch: `ERR_PLAN_FINGERPRINT_CONFLICT`
+Add a `formula_set` function in the adapter:
+- Set formulas for a cell, range, or table column
+- Parameters: `--file`, `--ref` (Sheet!A1, Sheet!A1:A10, or TableName[Column]), `--formula`, `--force-overwrite-values`, `--force-overwrite-formulas`
+- If ref targets a range, fill the formula into all cells in that range
+- If ref targets a table column (TableName[Column]), fill formula into all data rows
+- Resolve table column refs using existing `resolve_table_column_ref()`
+- Overwrite safeguards: block if existing cell has a value (unless `--force-overwrite-values`) or formula (unless `--force-overwrite-formulas`)
+- Return `ChangeRecord` with cells_touched count
 
-### Step 3.5 — Tests for validation and safety
-- Test formula overwrite blocked without force flag
-- Test fingerprint conflict detection
-- Test backup creation and atomic write
-- Test policy enforcement
+Wire `xl formula set` command in `cli.py`:
+- Uses `formula_app` subcommand group (already registered)
+- Options: `--file`, `--ref`, `--formula`, `--force-overwrite-values`, `--force-overwrite-formulas`, `--backup`, `--dry-run`, `--json`
+
+### Step 3.2 — `xl formula lint`
+
+**File changes**: `src/xl/adapters/openpyxl_engine.py`, `src/xl/cli.py`
+
+Add a `formula_lint` function in the adapter:
+- Scan all cells in a sheet (or workbook) for formula issues
+- Heuristic checks (no evaluation):
+  1. **Volatile functions**: detect `OFFSET`, `INDIRECT`, `NOW`, `TODAY`, `RAND`, `RANDBETWEEN` usage
+  2. **Broken refs**: detect `#REF!` in formula text
+  3. **Mixed patterns**: detect adjacent cells with inconsistent formula structures (e.g. A1 has `=B1+C1` but A2 has `=B2*C2`)
+  4. **Suspicious literals**: detect hardcoded numbers in formula regions where formulas are expected
+- Return a list of lint findings, each with: cell ref, category, severity (warning/info), message
+- Support `--sheet` filter to limit scope
+
+Wire `xl formula lint` in `cli.py`:
+- Options: `--file`, `--sheet` (optional), `--json`
+- Returns envelope with result containing list of lint findings
+
+### Step 3.3 — `xl formula find`
+
+**File changes**: `src/xl/adapters/openpyxl_engine.py`, `src/xl/cli.py`
+
+Add a `formula_find` function in the adapter:
+- Search workbook for formulas matching a regex pattern
+- Parameters: sheet (optional filter), pattern (regex string)
+- Return list of matches: cell ref (Sheet!A1), formula text, match snippet
+- Support `--pattern` flag for regex search (e.g. `--pattern "VLOOKUP"`)
+
+Wire `xl formula find` in `cli.py`:
+- Options: `--file`, `--pattern`, `--sheet` (optional), `--json`
+
+### Step 3.4 — `xl cell get`
+
+**File changes**: `src/xl/adapters/openpyxl_engine.py`, `src/xl/cli.py`
+
+Add a `cell_get` function in the adapter:
+- Read cell value by ref (Sheet!A1)
+- Return: value, type (str/int/float/bool/datetime/formula), formula text if formula, number_format
+- Support `--data-only` flag to read cached formula values instead of formula text
+
+Wire `xl cell get` in `cli.py`:
+- Options: `--file`, `--ref`, `--data-only`, `--json`
+
+### Step 3.5 — `xl range stat`
+
+**File changes**: `src/xl/adapters/openpyxl_engine.py`, `src/xl/cli.py`
+
+Add a `range_stat` function in the adapter:
+- Compute statistics for a range (Sheet!A1:F500)
+- Stats: row_count, col_count, non_empty_count, numeric_count, formula_count, min, max, sum, avg (for numeric cells)
+- Support `--data-only` for cached values
+
+Wire `xl range stat` in `cli.py`:
+- Options: `--file`, `--ref`, `--data-only`, `--json`
+
+### Step 3.6 — `xl range clear`
+
+**File changes**: `src/xl/adapters/openpyxl_engine.py`, `src/xl/cli.py`
+
+Add a `range_clear` function in the adapter:
+- Clear a range of cells
+- Modes: `--contents` (values + formulas), `--formats` (number formats, styles), `--all` (both)
+- Return `ChangeRecord` with cells_cleared count
+
+Wire `xl range clear` in `cli.py`:
+- Options: `--file`, `--ref`, `--contents`, `--formats`, `--all`, `--backup`, `--dry-run`, `--json`
+
+### Step 3.7 — `xl format` commands
+
+**File changes**: `src/xl/adapters/openpyxl_engine.py`, `src/xl/cli.py`
+
+Existing: `format_number()` already handles number/percent/currency/date formatting.
+
+Add new formatting operations:
+
+**`xl format width`** — Set column widths:
+- Function `format_width(ctx, sheet, columns, width)` in adapter
+- Options: `--file`, `--sheet`, `--columns` (e.g. "A,B,C" or "A:F"), `--width` (float), `--auto` (auto-fit based on content length)
+
+**`xl format freeze`** — Freeze panes:
+- Function `format_freeze(ctx, sheet, ref)` in adapter
+- Options: `--file`, `--sheet`, `--ref` (cell below and right of frozen area, e.g. "B2" freezes row 1 and column A)
+- Also support `--unfreeze` to remove freeze
+
+Wire these as subcommands of `format_app`:
+- `xl format number` (already exists via `format_number` in adapter — needs CLI wiring)
+- `xl format width`
+- `xl format freeze`
+
+### Step 3.8 — `xl validate refs`
+
+**File changes**: `src/xl/validation/validators.py`, `src/xl/cli.py`
+
+Add a `validate_refs` function:
+- Validate that a reference (Sheet!A1:D10) points to valid cells
+- Check: sheet exists, range within used area, cells not empty (optional)
+
+Wire `xl validate refs` in `cli.py`:
+- Options: `--file`, `--ref`, `--json`
+
+### Step 3.9 — Tests for Phase 3
+
+**File changes**: `tests/test_adapter.py`, `tests/test_cli.py` (extend existing)
+
+Add tests for:
+- `formula set` — set formula on cell, range, table column; test overwrite guards
+- `formula lint` — detect volatile functions, broken refs
+- `formula find` — search formulas by pattern
+- `cell get` — read cell values and types
+- `range stat` — compute range statistics
+- `range clear` — clear contents/formats
+- `format width` — set column widths
+- `format freeze` — freeze/unfreeze panes
+- `validate refs` — reference validation
 
 ---
 
-## Phase 4: Formula, Formatting, and Query (Milestone 3)
+## Phase 4: Verify, Diff, and Policy (Milestone 2 completion)
 
-### Step 4.1 — `xl formula set`
-- Set formulas for cell/range/table column
-- Support A1 and R1C1 input modes
-- Autofill behavior
-- Overwrite safeguards: `--force-overwrite-values`, `--force-overwrite-formulas`
+### Step 4.1 — `xl verify` post-apply assertions
 
-### Step 4.2 — `xl formula lint`
-- Heuristic checks (no evaluation): volatile functions, broken refs, mixed formula patterns, suspicious hardcoded literals
+**File changes**: `src/xl/engine/verify.py` (new), `src/xl/cli.py`
 
-### Step 4.3 — `xl formula find`
-- Search workbook for formulas matching a pattern
+Create verification engine:
+- Assertion types:
+  - `table.column_exists` — column exists in table
+  - `table.row_count` — table has expected row count (exact, min, max)
+  - `cell.value_equals` — cell value matches expected
+  - `cell.value_type` — cell value type matches expected
+  - `cell.not_empty` — cell is not empty
+  - `range.non_empty_count` — non-empty cell count in range
+- Input: `--file`, `--assertions` (inline JSON), or `--assertions-file` (JSON file)
+- Return: list of assertion results (passed/failed, expected, actual, message)
 
-### Step 4.4 — `xl format` commands
-- Number format presets
-- Column width setting
-- Style presets
-- Freeze panes
+### Step 4.2 — `xl diff` workbook comparison
 
-### Step 4.5 — `xl query` via DuckDB
-- Extract table data from workbook into DuckDB in-memory database
-- Support `--sql` for raw SQL queries
-- Support `--table`, `--where`, `--select` for structured queries
-- Return results via JSON envelope
+**File changes**: `src/xl/diff/differ.py`, `src/xl/cli.py`
 
-### Step 4.6 — `xl cell` and `xl range` commands
-- `xl cell set` — set cell value/formula with type coercion
-- `xl cell get` — read cell value
-- `xl range stat` — statistics for a range
-- `xl range clear` — clear range contents/formats
+Implement workbook diff:
+- Compare two workbook files (or a workbook before/after apply)
+- Diff output: list of cell-level changes (ref, before_value, after_value, change_type: added/removed/modified)
+- Options: `--file-a`, `--file-b`, `--sheet` (optional filter), `--json`
+- Group changes by sheet, then by type
+- Include metadata diff (sheets added/removed, tables added/removed)
 
-### Step 4.7 — `xl verify` post-apply assertions
-- Assert conditions after apply: column exists, value equals, row count, etc.
+### Step 4.3 — Policy engine
 
-### Step 4.8 — `xl diff` workbook comparison
-- Compare two workbook states or a workbook vs a plan's expected outcome
-- Output structured diff
+**File changes**: `src/xl/validation/policy.py` (new), `src/xl/validation/validators.py`
 
-### Step 4.9 — Tests for formula, formatting, query
-- Test formula set with overwrite guards
-- Test formula lint detection
-- Test DuckDB query results
-- Test formatting operations
-- Test cell/range operations
+Implement policy loading and enforcement:
+- Load `xl-policy.yaml` from `--config` path or current directory
+- Policy schema:
+  ```yaml
+  protected_sheets: [Sheet1]
+  protected_ranges: ["Sheet1!A1:A10"]
+  mutation_thresholds:
+    max_cells: 10000
+    max_rows: 5000
+  allowed_commands: [wb.inspect, sheet.ls, table.ls, validate.*]
+  redaction:
+    mask_columns: [SSN, Password]
+  ```
+- Integrate policy checks into `validate_plan()` and `apply_cmd()`
+- Return warnings/errors for policy violations
+
+### Step 4.4 — `xl wb lock-status`
+
+**File changes**: `src/xl/cli.py`
+
+Wire the existing `check_lock()` from `io/fileops.py`:
+- `xl wb lock-status --file budget.xlsx --json`
+- Return lock status in standard envelope
+
+### Step 4.5 — Tests for Phase 4
+
+Add tests for verify assertions, diff comparison, policy enforcement, lock status.
 
 ---
 
 ## Phase 5: Workflows + Observability (Milestone 4)
 
 ### Step 5.1 — `xl run` workflow execution
-- Parse YAML workflow spec (Section 14)
-- Execute steps sequentially with step references (`from_step`)
-- Support defaults (output format, recalc mode, dry_run)
-- Collect and return combined results
 
-### Step 5.2 — Event stream and observability
-- `--emit-events` flag for NDJSON event stream (Section 20)
-- Lifecycle events: workbook_opened, tables_detected, plan_validated, patch_applied, etc.
-- Metrics collection: rows/cells/formulas/sheets touched, duration, warnings/errors count
+**File changes**: `src/xl/engine/workflow.py` (new), `src/xl/cli.py`
 
-### Step 5.3 — Trace mode
-- `--trace` writes structured trace JSON file
-- Contains: command args (sanitized), references, fingerprints, validation report, operations, timing
+Implement workflow engine:
+- Parse YAML workflow spec (WorkflowSpec model already defined)
+- Execute steps sequentially
+- Support step references (`from_step`) to pass outputs between steps
+- Map step `run` values to internal command functions:
+  - `table.ls` → `ctx.list_tables()`
+  - `plan.compose` → create PatchPlan from operations list
+  - `validate.plan` → `validate_plan(ctx, plan)`
+  - `apply.plan` → apply plan operations
+  - `verify.assert` → run assertions
+- Collect results per step and return combined workflow result
+- Respect `defaults` (output format, recalc mode, dry_run)
 
-### Step 5.4 — `xl serve --stdio` machine server mode
-- JSON-RPC or line-delimited JSON protocol over stdin/stdout
-- Reuses same engine as CLI commands
-- Session management with persistent workbook context
+Wire `xl run` in `cli.py`:
+- Options: `--file` (YAML workflow path), `--json`
+- Alias: `app.command("run")`
 
-### Step 5.5 — Tests for workflows and observability
-- Test YAML workflow execution end-to-end
-- Test event stream output
-- Test trace file generation
+### Step 5.2 — Event stream (`--emit-events`)
+
+**File changes**: `src/xl/observe/events.py`, `src/xl/cli.py`
+
+Extend the observe module:
+- `EventEmitter` class that writes NDJSON events to stderr (to keep stdout for JSON responses)
+- Lifecycle events per PRD Section 20:
+  - `workbook_opened`, `workbook_scanned`, `tables_detected`
+  - `plan_validated`, `dry_run_completed`, `patch_applied`
+  - `recalc_started`, `recalc_finished`, `workbook_saved`
+- Each event: `{"event": "...", "timestamp": "...", "data": {...}}`
+- Wire global `--emit-events` flag to enable event emission
+- Thread the emitter through commands via a context variable or callback
+
+### Step 5.3 — Trace mode (`--trace`)
+
+**File changes**: `src/xl/observe/events.py`, `src/xl/cli.py`
+
+Implement trace file generation:
+- `TraceRecorder` class that collects trace data during execution
+- Trace file contents per PRD Section 20:
+  - Command args (sanitized: file path only, no content)
+  - Normalized target references
+  - Pre/post fingerprints
+  - Validation report summary
+  - Applied operations summary
+  - Timing breakdown (total, per-operation)
+- Wire global `--trace` flag: when set, writes `{workbook}.trace.json` alongside the workbook
+
+### Step 5.4 — `xl serve --stdio` (optional)
+
+**File changes**: `src/xl/server/stdio.py`, `src/xl/cli.py`
+
+Implement basic stdio server:
+- Read line-delimited JSON requests from stdin
+- Each request: `{"id": "...", "command": "table.ls", "args": {"file": "...", "sheet": "..."}}`
+- Dispatch to same engine functions as CLI commands
+- Write JSON response per line to stdout
+- Session management: keep WorkbookContext open across requests for same file
+- `xl serve --stdio` starts the server loop
+
+### Step 5.5 — Tests for Phase 5
+
+Add tests for:
+- Workflow execution (end-to-end YAML workflow)
+- Event stream output format
+- Trace file generation and content
+- stdio server request/response cycle
 
 ---
 
 ## Phase 6: Hardening (Milestone 5)
 
 ### Step 6.1 — Golden workbook fixtures
-- Create comprehensive test workbooks covering edge cases
-- Snapshot-based golden output tests
+- Create `tests/fixtures/workbooks/` with pre-built .xlsx files covering edge cases:
+  - Workbook with hidden sheets
+  - Workbook with named ranges
+  - Workbook with multiple tables across sheets
+  - Workbook with formulas (volatile, broken refs, mixed patterns)
+  - Workbook with various number formats
+  - Large workbook (1000+ rows)
 
 ### Step 6.2 — Property-based tests
-- Use `hypothesis` for patch/apply semantics
-- Fuzz test plan generation and application
+- Use `hypothesis` for:
+  - Plan generation → apply → verify round-trip
+  - Random cell values → set → get consistency
+  - Table append → row count correctness
 
 ### Step 6.3 — Performance testing
 - Test with large workbooks (10K+ rows)
-- Optimize read-only mode usage where possible
+- Ensure read-only mode is used for inspection commands
+- Profile and optimize hot paths
 
 ### Step 6.4 — Cross-platform verification
-- Verify core operations work on Linux (primary dev), macOS, Windows
-- Test file locking behavior across platforms
+- Verify file locking on Linux
+- Document platform-specific behavior
 
 ---
 
 ## Implementation Notes
 
-- **Develop on branch**: `claude/implement-prd-92M8L`
+- **Develop on branch**: `claude/continue-prd-4NQv5`
 - **Python version**: 3.12+
 - **Package manager**: `uv`
 - **Build system**: `hatchling`
 - **All commands** return the standard `ResponseEnvelope` JSON
-- **Exit codes** follow the taxonomy in Section 19
+- **Exit codes** follow the taxonomy in PRD Section 19
 - **Testing**: pytest with fixtures, golden outputs, and property-based tests
 
 ## Scope for This Session
 
-Given the scale of the PRD, this implementation session will focus on **Phase 1 (Foundation)** and **Phase 2 (Table Operations + Patch Plans)** — getting the core scaffolding, response contract, basic inspection commands, table operations, and the patch plan lifecycle working end-to-end. This provides a functional, testable CLI that demonstrates the core agent-first workflow: `inspect → plan → validate → dry-run → apply → verify`.
+This session implements **Phase 3** (Formula, Cell/Range, Formatting) and **Phase 4** (Verify, Diff, Policy) and **Phase 5** (Workflows, Observability), bringing the CLI to feature-complete v1 status. Phase 6 (Hardening) will be addressed as part of the implementation through incremental tests alongside each feature.

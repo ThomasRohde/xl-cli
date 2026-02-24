@@ -58,6 +58,8 @@ app.add_typer(formula_app)
 app.add_typer(format_app)
 app.add_typer(validate_app)
 app.add_typer(plan_app)
+app.add_typer(verify_app)
+app.add_typer(diff_app)
 
 # Type aliases for common options
 FilePath = Annotated[str, typer.Option("--file", "-f", help="Path to Excel workbook")]
@@ -856,6 +858,573 @@ def query_cmd(
         duration_ms=t.elapsed_ms,
     )
     _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl cell get
+# ---------------------------------------------------------------------------
+@cell_app.command("get")
+def cell_get_cmd(
+    file: FilePath,
+    ref: Annotated[str, typer.Option("--ref", help="Cell reference (e.g. Sheet1!B2)")],
+    data_only: Annotated[bool, typer.Option("--data-only", help="Read cached formula values")] = False,
+    json_out: JsonFlag = True,
+):
+    """Read a cell value."""
+    from xl.adapters.openpyxl_engine import cell_get
+
+    if "!" not in ref:
+        env = error_envelope("cell.get", "ERR_RANGE_INVALID", "Ref must include sheet name (e.g. Sheet1!B2)", target=Target(file=file))
+        _emit(env)
+        return
+
+    sheet_name, cell_ref = ref.split("!", 1)
+
+    with Timer() as t:
+        try:
+            ctx = _load_ctx(file, data_only=data_only)
+        except FileNotFoundError:
+            env = error_envelope("cell.get", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+            _emit(env)
+            return
+
+        try:
+            result = cell_get(ctx, sheet_name, cell_ref)
+        except (ValueError, KeyError) as e:
+            ctx.close()
+            env = error_envelope("cell.get", "ERR_RANGE_INVALID", str(e), target=Target(file=file, ref=ref))
+            _emit(env)
+            return
+        ctx.close()
+
+    env = success_envelope("cell.get", result, target=Target(file=file, ref=ref), duration_ms=t.elapsed_ms)
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl range stat
+# ---------------------------------------------------------------------------
+@range_app.command("stat")
+def range_stat_cmd(
+    file: FilePath,
+    ref: Annotated[str, typer.Option("--ref", help="Range reference (e.g. Sheet1!A1:D10)")],
+    data_only: Annotated[bool, typer.Option("--data-only")] = False,
+    json_out: JsonFlag = True,
+):
+    """Compute statistics for a range."""
+    from xl.adapters.openpyxl_engine import range_stat
+
+    if "!" not in ref:
+        env = error_envelope("range.stat", "ERR_RANGE_INVALID", "Ref must include sheet name", target=Target(file=file))
+        _emit(env)
+        return
+
+    sheet_name, range_ref = ref.split("!", 1)
+
+    with Timer() as t:
+        try:
+            ctx = _load_ctx(file, data_only=data_only)
+        except FileNotFoundError:
+            env = error_envelope("range.stat", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+            _emit(env)
+            return
+
+        result = range_stat(ctx, sheet_name, range_ref)
+        ctx.close()
+
+    env = success_envelope("range.stat", result, target=Target(file=file, ref=ref), duration_ms=t.elapsed_ms)
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl range clear
+# ---------------------------------------------------------------------------
+@range_app.command("clear")
+def range_clear_cmd(
+    file: FilePath,
+    ref: Annotated[str, typer.Option("--ref", help="Range reference (e.g. Sheet1!A1:D10)")],
+    contents: Annotated[bool, typer.Option("--contents", help="Clear values and formulas")] = True,
+    formats: Annotated[bool, typer.Option("--formats", help="Clear formatting")] = False,
+    clear_all: Annotated[bool, typer.Option("--all", help="Clear contents and formats")] = False,
+    backup: Annotated[bool, typer.Option("--backup")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    json_out: JsonFlag = True,
+):
+    """Clear a range of cells."""
+    from xl.adapters.openpyxl_engine import range_clear
+
+    if "!" not in ref:
+        env = error_envelope("range.clear", "ERR_RANGE_INVALID", "Ref must include sheet name", target=Target(file=file))
+        _emit(env)
+        return
+
+    sheet_name, range_ref = ref.split("!", 1)
+    do_contents = contents or clear_all
+    do_formats = formats or clear_all
+
+    with Timer() as t:
+        try:
+            ctx = _load_ctx(file)
+        except FileNotFoundError:
+            env = error_envelope("range.clear", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+            _emit(env)
+            return
+
+        change = range_clear(ctx, sheet_name, range_ref, contents=do_contents, formats=do_formats)
+
+        backup_path = None
+        if not dry_run:
+            if backup:
+                from xl.io.fileops import backup as make_backup
+                backup_path = make_backup(file)
+            ctx.save(file)
+        ctx.close()
+
+    result = {"dry_run": dry_run, "backup_path": backup_path}
+    env = success_envelope(
+        "range.clear", result, target=Target(file=file, ref=ref),
+        changes=[change], duration_ms=t.elapsed_ms,
+    )
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl formula set
+# ---------------------------------------------------------------------------
+@formula_app.command("set")
+def formula_set_cmd(
+    file: FilePath,
+    ref: Annotated[str, typer.Option("--ref", help="Cell/range ref (Sheet!A1 or Sheet!A1:A10 or Table[Col])")],
+    formula: Annotated[str, typer.Option("--formula", help="Formula to set")],
+    force_overwrite_values: Annotated[bool, typer.Option("--force-overwrite-values")] = False,
+    force_overwrite_formulas: Annotated[bool, typer.Option("--force-overwrite-formulas")] = False,
+    backup: Annotated[bool, typer.Option("--backup")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    json_out: JsonFlag = True,
+):
+    """Set a formula on a cell, range, or table column."""
+    from xl.adapters.openpyxl_engine import formula_set, resolve_table_column_ref
+
+    with Timer() as t:
+        try:
+            ctx = _load_ctx(file)
+        except FileNotFoundError:
+            env = error_envelope("formula.set", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+            _emit(env)
+            return
+
+        # Resolve ref
+        resolved = resolve_table_column_ref(ctx, ref)
+        if resolved:
+            sheet_name, cell_ref = resolved
+        elif "!" in ref:
+            sheet_name, cell_ref = ref.split("!", 1)
+        else:
+            ctx.close()
+            env = error_envelope("formula.set", "ERR_RANGE_INVALID", "Ref must include sheet (Sheet!A1) or be a table column (Table[Col])", target=Target(file=file))
+            _emit(env)
+            return
+
+        try:
+            change = formula_set(ctx, sheet_name, cell_ref, formula,
+                                 force_overwrite_values=force_overwrite_values,
+                                 force_overwrite_formulas=force_overwrite_formulas)
+        except (ValueError, KeyError) as e:
+            ctx.close()
+            env = error_envelope("formula.set", "ERR_FORMULA_BLOCKED", str(e), target=Target(file=file, ref=ref))
+            _emit(env)
+            return
+
+        backup_path = None
+        if not dry_run:
+            if backup:
+                from xl.io.fileops import backup as make_backup
+                backup_path = make_backup(file)
+            ctx.save(file)
+        ctx.close()
+
+    result = {"dry_run": dry_run, "backup_path": backup_path}
+    env = success_envelope(
+        "formula.set", result, target=Target(file=file, ref=ref),
+        changes=[change], duration_ms=t.elapsed_ms,
+    )
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl formula lint
+# ---------------------------------------------------------------------------
+@formula_app.command("lint")
+def formula_lint_cmd(
+    file: FilePath,
+    sheet: SheetOpt = None,
+    json_out: JsonFlag = True,
+):
+    """Lint formulas for common issues."""
+    from xl.adapters.openpyxl_engine import formula_lint
+
+    with Timer() as t:
+        try:
+            ctx = _load_ctx(file)
+        except FileNotFoundError:
+            env = error_envelope("formula.lint", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+            _emit(env)
+            return
+
+        findings = formula_lint(ctx, sheet)
+        ctx.close()
+
+    env = success_envelope("formula.lint", {"findings": findings, "count": len(findings)},
+                           target=Target(file=file, sheet=sheet), duration_ms=t.elapsed_ms)
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl formula find
+# ---------------------------------------------------------------------------
+@formula_app.command("find")
+def formula_find_cmd(
+    file: FilePath,
+    pattern: Annotated[str, typer.Option("--pattern", help="Regex pattern to match")],
+    sheet: SheetOpt = None,
+    json_out: JsonFlag = True,
+):
+    """Search formulas matching a pattern."""
+    from xl.adapters.openpyxl_engine import formula_find
+
+    with Timer() as t:
+        try:
+            ctx = _load_ctx(file)
+        except FileNotFoundError:
+            env = error_envelope("formula.find", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+            _emit(env)
+            return
+
+        matches = formula_find(ctx, pattern, sheet)
+        ctx.close()
+
+    env = success_envelope("formula.find", {"matches": matches, "count": len(matches)},
+                           target=Target(file=file, sheet=sheet), duration_ms=t.elapsed_ms)
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl format number (CLI wiring for existing adapter)
+# ---------------------------------------------------------------------------
+@format_app.command("number")
+def format_number_cmd(
+    file: FilePath,
+    ref: Annotated[str, typer.Option("--ref", help="Range ref (Sheet!A1:D10) or Table[Col]")],
+    style: Annotated[str, typer.Option("--style", help="number|percent|currency|date|text")] = "number",
+    decimals: Annotated[int, typer.Option("--decimals")] = 2,
+    backup: Annotated[bool, typer.Option("--backup")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    json_out: JsonFlag = True,
+):
+    """Apply number format to a range."""
+    from xl.adapters.openpyxl_engine import format_number, resolve_table_column_ref
+
+    with Timer() as t:
+        try:
+            ctx = _load_ctx(file)
+        except FileNotFoundError:
+            env = error_envelope("format.number", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+            _emit(env)
+            return
+
+        resolved = resolve_table_column_ref(ctx, ref)
+        if resolved:
+            sheet_name, cell_ref = resolved
+        elif "!" in ref:
+            sheet_name, cell_ref = ref.split("!", 1)
+        else:
+            ctx.close()
+            env = error_envelope("format.number", "ERR_RANGE_INVALID", "Ref must include sheet or be Table[Col]", target=Target(file=file))
+            _emit(env)
+            return
+
+        change = format_number(ctx, sheet_name, cell_ref, style=style, decimals=decimals)
+
+        backup_path = None
+        if not dry_run:
+            if backup:
+                from xl.io.fileops import backup as make_backup
+                backup_path = make_backup(file)
+            ctx.save(file)
+        ctx.close()
+
+    result = {"dry_run": dry_run, "backup_path": backup_path}
+    env = success_envelope(
+        "format.number", result, target=Target(file=file, ref=ref),
+        changes=[change], duration_ms=t.elapsed_ms,
+    )
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl format width
+# ---------------------------------------------------------------------------
+@format_app.command("width")
+def format_width_cmd(
+    file: FilePath,
+    sheet: Annotated[str, typer.Option("--sheet", "-s", help="Sheet name")],
+    columns: Annotated[str, typer.Option("--columns", help="Columns (e.g. A,B,C)")],
+    width: Annotated[float, typer.Option("--width", help="Column width")],
+    backup: Annotated[bool, typer.Option("--backup")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    json_out: JsonFlag = True,
+):
+    """Set column widths."""
+    from xl.adapters.openpyxl_engine import format_width
+
+    col_list = [c.strip() for c in columns.split(",")]
+
+    with Timer() as t:
+        try:
+            ctx = _load_ctx(file)
+        except FileNotFoundError:
+            env = error_envelope("format.width", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+            _emit(env)
+            return
+
+        change = format_width(ctx, sheet, col_list, width)
+
+        backup_path = None
+        if not dry_run:
+            if backup:
+                from xl.io.fileops import backup as make_backup
+                backup_path = make_backup(file)
+            ctx.save(file)
+        ctx.close()
+
+    result = {"dry_run": dry_run, "backup_path": backup_path}
+    env = success_envelope(
+        "format.width", result, target=Target(file=file, sheet=sheet),
+        changes=[change], duration_ms=t.elapsed_ms,
+    )
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl format freeze
+# ---------------------------------------------------------------------------
+@format_app.command("freeze")
+def format_freeze_cmd(
+    file: FilePath,
+    sheet: Annotated[str, typer.Option("--sheet", "-s", help="Sheet name")],
+    ref: Annotated[Optional[str], typer.Option("--ref", help="Cell below/right of frozen area (e.g. B2)")] = None,
+    unfreeze: Annotated[bool, typer.Option("--unfreeze", help="Remove freeze")] = False,
+    backup: Annotated[bool, typer.Option("--backup")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    json_out: JsonFlag = True,
+):
+    """Freeze or unfreeze panes."""
+    from xl.adapters.openpyxl_engine import format_freeze
+
+    freeze_ref = None if unfreeze else ref
+    if not unfreeze and not ref:
+        env = error_envelope("format.freeze", "ERR_MISSING_PARAM", "Provide --ref or --unfreeze", target=Target(file=file))
+        _emit(env)
+        return
+
+    with Timer() as t:
+        try:
+            ctx = _load_ctx(file)
+        except FileNotFoundError:
+            env = error_envelope("format.freeze", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+            _emit(env)
+            return
+
+        change = format_freeze(ctx, sheet, freeze_ref)
+
+        backup_path = None
+        if not dry_run:
+            if backup:
+                from xl.io.fileops import backup as make_backup
+                backup_path = make_backup(file)
+            ctx.save(file)
+        ctx.close()
+
+    result = {"dry_run": dry_run, "backup_path": backup_path}
+    env = success_envelope(
+        "format.freeze", result, target=Target(file=file, sheet=sheet),
+        changes=[change], duration_ms=t.elapsed_ms,
+    )
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl validate refs
+# ---------------------------------------------------------------------------
+@validate_app.command("refs")
+def validate_refs_cmd(
+    file: FilePath,
+    ref: Annotated[str, typer.Option("--ref", help="Reference to validate (e.g. Sheet1!A1:D10)")],
+    json_out: JsonFlag = True,
+):
+    """Validate that a reference points to valid cells."""
+    with Timer() as t:
+        try:
+            ctx = _load_ctx(file)
+        except FileNotFoundError:
+            env = error_envelope("validate.refs", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+            _emit(env)
+            return
+
+        checks: list[dict] = []
+        if "!" in ref:
+            sheet_name, range_ref = ref.split("!", 1)
+            if sheet_name in ctx.wb.sheetnames:
+                checks.append({"type": "sheet_exists", "target": sheet_name, "passed": True, "message": f"Sheet '{sheet_name}' exists"})
+                ws = ctx.wb[sheet_name]
+                checks.append({"type": "range_valid", "target": ref, "passed": True, "message": f"Range '{range_ref}' is valid"})
+            else:
+                checks.append({"type": "sheet_exists", "target": sheet_name, "passed": False, "message": f"Sheet '{sheet_name}' not found"})
+        else:
+            checks.append({"type": "ref_format", "target": ref, "passed": False, "message": "Reference must include sheet name (Sheet!A1)"})
+
+        ctx.close()
+
+    valid = all(c.get("passed", True) for c in checks)
+    result = ValidationResult(valid=valid, checks=checks)
+    env = success_envelope("validate.refs", result.model_dump(), target=Target(file=file, ref=ref), duration_ms=t.elapsed_ms)
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl wb lock-status
+# ---------------------------------------------------------------------------
+@wb_app.command("lock-status")
+def wb_lock_status_cmd(
+    file: FilePath,
+    json_out: JsonFlag = True,
+):
+    """Check if a workbook file is locked."""
+    from xl.io.fileops import check_lock
+
+    with Timer() as t:
+        result = check_lock(file)
+
+    env = success_envelope("wb.lock_status", result, target=Target(file=file), duration_ms=t.elapsed_ms)
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl verify assert
+# ---------------------------------------------------------------------------
+@verify_app.command("assert")
+def verify_assert_cmd(
+    file: FilePath,
+    assertions: Annotated[Optional[str], typer.Option("--assertions", help="Inline JSON array of assertions")] = None,
+    assertions_file: Annotated[Optional[str], typer.Option("--assertions-file", help="Path to JSON file with assertions")] = None,
+    json_out: JsonFlag = True,
+):
+    """Run post-apply assertions on a workbook."""
+    from xl.engine.verify import run_assertions
+
+    if assertions:
+        assertion_list = json.loads(assertions)
+    elif assertions_file:
+        assertion_list = json.loads(Path(assertions_file).read_text())
+    else:
+        env = error_envelope("verify.assert", "ERR_MISSING_DATA", "Provide --assertions or --assertions-file", target=Target(file=file))
+        _emit(env)
+        return
+
+    with Timer() as t:
+        try:
+            ctx = _load_ctx(file)
+        except FileNotFoundError:
+            env = error_envelope("verify.assert", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+            _emit(env)
+            return
+
+        results = run_assertions(ctx, assertion_list)
+        ctx.close()
+
+    all_passed = all(r.get("passed", False) for r in results)
+    result = {"passed": all_passed, "assertions": results, "total": len(results), "passed_count": sum(1 for r in results if r.get("passed"))}
+    env = success_envelope("verify.assert", result, target=Target(file=file), duration_ms=t.elapsed_ms)
+    if not all_passed:
+        env.ok = False
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl diff compare
+# ---------------------------------------------------------------------------
+@diff_app.command("compare")
+def diff_compare_cmd(
+    file_a: Annotated[str, typer.Option("--file-a", help="First workbook")],
+    file_b: Annotated[str, typer.Option("--file-b", help="Second workbook")],
+    sheet: SheetOpt = None,
+    json_out: JsonFlag = True,
+):
+    """Compare two workbook files."""
+    from xl.diff.differ import diff_workbooks
+
+    with Timer() as t:
+        try:
+            result = diff_workbooks(file_a, file_b, sheet_filter=sheet)
+        except FileNotFoundError as e:
+            env = error_envelope("diff.compare", "ERR_WORKBOOK_NOT_FOUND", str(e))
+            _emit(env)
+            return
+
+    env = success_envelope("diff.compare", result, duration_ms=t.elapsed_ms)
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl run
+# ---------------------------------------------------------------------------
+@app.command("run")
+def run_cmd(
+    workflow_file: Annotated[str, typer.Option("--workflow", "-w", help="Path to YAML workflow file")],
+    file: Annotated[Optional[str], typer.Option("--file", "-f", help="Override target workbook")] = None,
+    json_out: JsonFlag = True,
+):
+    """Execute a YAML workflow."""
+    from xl.engine.workflow import execute_workflow, load_workflow
+
+    with Timer() as t:
+        try:
+            workflow = load_workflow(workflow_file)
+        except Exception as e:
+            env = error_envelope("run", "ERR_WORKFLOW_INVALID", f"Cannot parse workflow: {e}")
+            _emit(env)
+            return
+
+        workbook_path = file or workflow.target.get("file", "")
+        if not workbook_path:
+            env = error_envelope("run", "ERR_MISSING_PARAM", "Provide --file or set target.file in workflow")
+            _emit(env)
+            return
+
+        try:
+            result = execute_workflow(workflow, workbook_path)
+        except Exception as e:
+            env = error_envelope("run", "ERR_WORKFLOW_FAILED", str(e), target=Target(file=workbook_path))
+            _emit(env)
+            return
+
+    env = success_envelope("run", result, target=Target(file=workbook_path), duration_ms=t.elapsed_ms)
+    if not result.get("ok"):
+        env.ok = False
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl serve --stdio
+# ---------------------------------------------------------------------------
+@app.command("serve")
+def serve_cmd(
+    stdio: Annotated[bool, typer.Option("--stdio", help="Run in stdio server mode")] = True,
+):
+    """Start machine server mode."""
+    from xl.server.stdio import StdioServer
+    server = StdioServer()
+    server.run()
 
 
 # ---------------------------------------------------------------------------

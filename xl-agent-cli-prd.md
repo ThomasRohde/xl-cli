@@ -2,7 +2,7 @@
 Version: 1.0 (Developer-ready PRD)  
 Date: 2026-02-24  
 Author: ChatGPT (for Thomas)  
-Status: Proposed (v1 implementation spec)
+Status: **v1 Implementation Complete** (all milestones 0–4 delivered)
 
 ## 1) Product summary
 
@@ -748,35 +748,41 @@ Optional `--emit-events` streams lifecycle events:
 
 ## 25) Milestones (pragmatic implementation plan)
 
-### Milestone 0 — Foundation (1–2 weeks)
+### Milestone 0 — Foundation ✅ COMPLETE
 - repo scaffold, uv/hatch, Typer app
 - response envelope + error taxonomy
 - basic `wb inspect`, `sheet ls`
 
-### Milestone 1 — Table-first inspect/mutate (2–4 weeks)
+### Milestone 1 — Table-first inspect/mutate ✅ COMPLETE
 - `table ls`, `table add-column`, `table append-rows`
 - patch plan schema + `plan show`
 - `apply --dry-run`
 
-### Milestone 2 — Validation and safety (2–3 weeks)
-- policy file
+### Milestone 2 — Validation and safety ✅ COMPLETE
+- policy file (`xl-policy.yaml` with protected sheets, mutation thresholds)
 - fingerprint conflict checks
 - backup + atomic write
 - thresholds/protected ranges
+- `validate refs`, `validate workbook`, `validate plan`
+- `wb lock-status`
 
-### Milestone 3 — Formula + formatting + query (2–4 weeks)
-- `formula set`, `formula lint`
-- `format number`, freeze panes, widths
+### Milestone 3 — Formula + formatting + query ✅ COMPLETE
+- `formula set` (with overwrite guards), `formula lint` (volatile/broken ref detection), `formula find`
+- `format number`, `format width`, `format freeze` (freeze/unfreeze panes)
 - `query` via DuckDB extraction
+- `cell get`, `range stat`, `range clear`
+- `verify assert` (post-apply assertions: column exists, row count, cell value, etc.)
+- `diff compare` (cell-level workbook comparison)
 
-### Milestone 4 — Workflows + observability (2–3 weeks)
-- `xl run workflow.yaml`
-- event stream + trace artifacts
-- `serve --stdio` machine mode (optional but highly valuable)
+### Milestone 4 — Workflows + observability ✅ COMPLETE
+- `xl run workflow.yaml` (YAML workflow execution with step sequencing)
+- `EventEmitter` — NDJSON lifecycle event stream to stderr
+- `TraceRecorder` — structured trace file generation
+- `serve --stdio` machine mode (JSON line-delimited server)
 
-### Milestone 5 — Hardening (ongoing)
+### Milestone 5 — Hardening (remaining)
 - golden workbook fixtures
-- fuzz/property tests
+- fuzz/property tests (hypothesis)
 - performance tuning on large workbooks
 - docs + examples for agents
 
@@ -889,20 +895,30 @@ xl-agent-cli/
 
 ## 30) Build decision summary (what to implement now)
 
-If starting tomorrow, implement this exact v1 slice first:
+**All v1 items below are implemented and tested (99 tests passing):**
 
-1. `wb inspect`, `sheet ls`, `table ls`
-2. `plan add-column`, `plan format`, `plan show`
-3. `validate plan`
-4. `apply --dry-run` + `apply`
-5. fingerprint conflict detection + backups
-6. JSON envelope + exit codes
-7. `table append-rows`
-8. `formula set` + overwrite guards
-9. `query` (DuckDB)
-10. `run workflow.yaml`
+1. ✅ `wb inspect`, `sheet ls`, `table ls`
+2. ✅ `plan add-column`, `plan format`, `plan show`, `plan set-cells`, `plan compose`
+3. ✅ `validate plan`, `validate workbook`, `validate refs`
+4. ✅ `apply --dry-run` + `apply`
+5. ✅ fingerprint conflict detection + backups
+6. ✅ JSON envelope + exit codes
+7. ✅ `table append-rows`
+8. ✅ `formula set` + overwrite guards, `formula lint`, `formula find`
+9. ✅ `query` (DuckDB)
+10. ✅ `run workflow.yaml`
 
-This gets you a real, agent-usable product quickly and avoids the trap of overbuilding chart/pivot support before the execution model is solid.
+**Additionally delivered beyond the v1 slice:**
+- ✅ `cell get`, `cell set` — read/write cell values with type detection
+- ✅ `range stat`, `range clear` — range statistics and clearing
+- ✅ `format number`, `format width`, `format freeze` — formatting commands
+- ✅ `verify assert` — post-apply assertions (column exists, row count, cell value, etc.)
+- ✅ `diff compare` — cell-level workbook comparison
+- ✅ `wb lock-status` — file lock detection
+- ✅ Policy engine (`xl-policy.yaml`) — protected sheets, mutation thresholds
+- ✅ `EventEmitter` — NDJSON lifecycle event stream
+- ✅ `TraceRecorder` — structured trace file generation
+- ✅ `serve --stdio` — JSON line-delimited machine server mode
 
 ---
 

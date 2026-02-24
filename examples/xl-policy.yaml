@@ -1,0 +1,29 @@
+# Example xl-policy.yaml — governance rules for workbook mutations
+#
+# Place this file in your project root or pass --policy path/to/xl-policy.yaml
+# to enforce safety rules during plan validation and apply.
+
+# Sheets that cannot be mutated
+protected_sheets:
+  - "Config"
+  - "Metadata"
+
+# Ranges that cannot be mutated (Sheet!Range format)
+protected_ranges:
+  - "Summary!A1:Z1"  # protect header row in Summary
+
+# Maximum mutations allowed in a single plan
+mutation_thresholds:
+  max_cells: 10000
+  max_rows: 5000
+
+# Restrict which commands are allowed (empty = all allowed)
+allowed_commands: []
+
+# Redaction rules for trace/log output
+redaction:
+  mask_columns:
+    - "SSN"
+    - "CreditCard"
+  mask_ranges:
+    - "Sensitive!A:Z"

@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0",
+  "plan_id": "pln_append_q1_data",
+  "target": {
+    "file": "budget.xlsx",
+    "fingerprint": null
+  },
+  "options": {
+    "recalc_mode": "cached",
+    "backup": true,
+    "fail_on_external_change": true
+  },
+  "preconditions": [
+    {"type": "table_exists", "table": "Sales"}
+  ],
+  "operations": [
+    {
+      "op_id": "op1",
+      "type": "table.append_rows",
+      "table": "Sales",
+      "rows": [
+        {"Region": "Central", "Product": "Widget", "Sales": 1800, "Cost": 1050},
+        {"Region": "Central", "Product": "Gadget", "Sales": 950, "Cost": 580}
+      ],
+      "schema_mode": "strict"
+    }
+  ],
+  "postconditions": [
+    {"type": "table.row_count", "table": "Sales", "min": 6}
+  ]
+}

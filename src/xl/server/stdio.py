@@ -90,11 +90,27 @@ class StdioServer:
                             row_data[col_name] = cell.value
                         data_rows.append(row_data)
                     if data_rows:
-                        conn.execute(f"CREATE TABLE \"{tbl.name}\" AS SELECT * FROM data_rows")
-                result = conn.execute(sql).fetchdf()
-                rows = result.to_dict(orient="records")
+                        col_defs = []
+                        for col_name in col_names:
+                            sample = data_rows[0].get(col_name)
+                            if isinstance(sample, int):
+                                col_defs.append(f'"{col_name}" BIGINT')
+                            elif isinstance(sample, float):
+                                col_defs.append(f'"{col_name}" DOUBLE')
+                            else:
+                                col_defs.append(f'"{col_name}" VARCHAR')
+                        conn.execute(f'CREATE TABLE "{tbl.name}" ({", ".join(col_defs)})')
+                        placeholders = ", ".join(["?"] * len(col_names))
+                        insert_sql = f'INSERT INTO "{tbl.name}" VALUES ({placeholders})'
+                        for row_data in data_rows:
+                            vals = [row_data.get(c) for c in col_names]
+                            conn.execute(insert_sql, vals)
+                cursor = conn.execute(sql)
+                columns = [desc[0] for desc in cursor.description]
+                raw_rows = cursor.fetchall()
+                rows = [dict(zip(columns, row)) for row in raw_rows]
                 conn.close()
-                return {"id": req_id, "ok": True, "result": {"columns": list(result.columns), "rows": rows, "row_count": len(rows)}}
+                return {"id": req_id, "ok": True, "result": {"columns": columns, "rows": rows, "row_count": len(rows)}}
 
             elif command == "close":
                 self._close_all()

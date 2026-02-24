@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "plan_id": "pln_add_margin_column",
+  "target": {
+    "file": "budget.xlsx",
+    "fingerprint": null
+  },
+  "options": {
+    "recalc_mode": "cached",
+    "backup": true,
+    "fail_on_external_change": true
+  },
+  "preconditions": [
+    {"type": "table_exists", "table": "Sales"}
+  ],
+  "operations": [
+    {
+      "op_id": "op1",
+      "type": "table.add_column",
+      "table": "Sales",
+      "name": "GrossMarginPct",
+      "formula": "=[@GrossMargin]/[@Revenue]"
+    },
+    {
+      "op_id": "op2",
+      "type": "format.number",
+      "ref": "Sales[GrossMarginPct]",
+      "style": "percent",
+      "decimals": 2
+    }
+  ],
+  "postconditions": [
+    {"type": "column_exists", "table": "Sales", "column": "GrossMarginPct"}
+  ]
+}

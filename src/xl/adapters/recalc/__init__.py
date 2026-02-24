@@ -1,0 +1,1 @@
+"""Recalculation strategy adapters."""

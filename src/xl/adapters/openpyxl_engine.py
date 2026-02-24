@@ -227,3 +227,296 @@ def resolve_table_column_ref(ctx: WorkbookContext, ref: str) -> tuple[str, str] 
             col_letter = get_column_letter(col_idx)
             return sheet_name, f"{col_letter}{min_row}:{col_letter}{max_row}"
     return None
+
+
+# ---------------------------------------------------------------------------
+# formula set
+# ---------------------------------------------------------------------------
+def formula_set(
+    ctx: WorkbookContext,
+    sheet_name: str,
+    ref: str,
+    formula: str,
+    *,
+    force_overwrite_values: bool = False,
+    force_overwrite_formulas: bool = False,
+) -> ChangeRecord:
+    """Set a formula on a cell or range."""
+    ws = ctx.get_sheet(sheet_name)
+    min_row, min_col, max_row, max_col = _parse_ref(ref)
+
+    cells_touched = 0
+    blocked: list[str] = []
+    for row in range(min_row, max_row + 1):
+        for col in range(min_col, max_col + 1):
+            cell = ws.cell(row=row, column=col)
+            old_val = cell.value
+            cell_ref = f"{get_column_letter(col)}{row}"
+            # Guard: existing formula
+            if isinstance(old_val, str) and old_val.startswith("=") and not force_overwrite_formulas:
+                blocked.append(f"{cell_ref} has formula '{old_val}'")
+                continue
+            # Guard: existing non-empty value
+            if old_val is not None and not (isinstance(old_val, str) and old_val.startswith("=")) and not force_overwrite_values:
+                blocked.append(f"{cell_ref} has value '{old_val}'")
+                continue
+            cell.value = formula
+            cells_touched += 1
+
+    if blocked and cells_touched == 0:
+        raise ValueError(
+            f"All cells blocked: {'; '.join(blocked[:5])}. "
+            "Use --force-overwrite-values or --force-overwrite-formulas."
+        )
+
+    return ChangeRecord(
+        type="formula.set",
+        target=f"{sheet_name}!{ref}",
+        after={"formula": formula, "cells_touched": cells_touched, "blocked": len(blocked)},
+        impact={"cells": cells_touched},
+        warnings=[WarningDetail(code="WARN_CELLS_BLOCKED", message=msg) for msg in blocked[:5]],
+    )
+
+
+# ---------------------------------------------------------------------------
+# formula lint
+# ---------------------------------------------------------------------------
+_VOLATILE_FUNCS = re.compile(r"\b(OFFSET|INDIRECT|NOW|TODAY|RAND|RANDBETWEEN)\b", re.IGNORECASE)
+_BROKEN_REF = re.compile(r"#REF!")
+
+
+def formula_lint(
+    ctx: WorkbookContext,
+    sheet_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """Heuristic lint checks on formulas. Returns list of findings."""
+    findings: list[dict[str, Any]] = []
+    sheets = [sheet_name] if sheet_name else ctx.wb.sheetnames
+
+    for sname in sheets:
+        ws = ctx.wb[sname]
+        for row in ws.iter_rows():
+            for cell in row:
+                val = cell.value
+                if not isinstance(val, str) or not val.startswith("="):
+                    continue
+                cell_ref = f"{sname}!{cell.coordinate}"
+                # Volatile functions
+                m = _VOLATILE_FUNCS.search(val)
+                if m:
+                    findings.append({
+                        "ref": cell_ref,
+                        "category": "volatile_function",
+                        "severity": "warning",
+                        "message": f"Uses volatile function {m.group(0).upper()}",
+                        "formula": val,
+                    })
+                # Broken refs
+                if _BROKEN_REF.search(val):
+                    findings.append({
+                        "ref": cell_ref,
+                        "category": "broken_ref",
+                        "severity": "warning",
+                        "message": "Contains #REF! error reference",
+                        "formula": val,
+                    })
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# formula find
+# ---------------------------------------------------------------------------
+def formula_find(
+    ctx: WorkbookContext,
+    pattern: str,
+    sheet_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """Search workbook for formulas matching a regex pattern."""
+    regex = re.compile(pattern, re.IGNORECASE)
+    matches: list[dict[str, Any]] = []
+    sheets = [sheet_name] if sheet_name else ctx.wb.sheetnames
+
+    for sname in sheets:
+        ws = ctx.wb[sname]
+        for row in ws.iter_rows():
+            for cell in row:
+                val = cell.value
+                if not isinstance(val, str) or not val.startswith("="):
+                    continue
+                m = regex.search(val)
+                if m:
+                    matches.append({
+                        "ref": f"{sname}!{cell.coordinate}",
+                        "formula": val,
+                        "match": m.group(0),
+                    })
+
+    return matches
+
+
+# ---------------------------------------------------------------------------
+# cell get
+# ---------------------------------------------------------------------------
+def cell_get(
+    ctx: WorkbookContext,
+    sheet_name: str,
+    ref: str,
+) -> dict[str, Any]:
+    """Read a cell value and metadata."""
+    ws = ctx.get_sheet(sheet_name)
+    m = re.match(r"([A-Z]+)(\d+)", ref.replace("$", ""))
+    if not m:
+        raise ValueError(f"Invalid cell ref: {ref}")
+    col = column_index_from_string(m.group(1))
+    row = int(m.group(2))
+
+    cell = ws.cell(row=row, column=col)
+    val = cell.value
+    val_type = "empty"
+    formula_text = None
+    if val is None:
+        val_type = "empty"
+    elif isinstance(val, str) and val.startswith("="):
+        val_type = "formula"
+        formula_text = val
+    elif isinstance(val, bool):
+        val_type = "bool"
+    elif isinstance(val, (int, float)):
+        val_type = "number"
+    elif isinstance(val, str):
+        val_type = "text"
+    else:
+        val_type = type(val).__name__
+
+    return {
+        "ref": f"{sheet_name}!{ref}",
+        "value": val,
+        "type": val_type,
+        "formula": formula_text,
+        "number_format": cell.number_format,
+    }
+
+
+# ---------------------------------------------------------------------------
+# range stat
+# ---------------------------------------------------------------------------
+def range_stat(
+    ctx: WorkbookContext,
+    sheet_name: str,
+    ref: str,
+) -> dict[str, Any]:
+    """Compute statistics for a range."""
+    ws = ctx.get_sheet(sheet_name)
+    min_row, min_col, max_row, max_col = _parse_ref(ref)
+
+    row_count = max_row - min_row + 1
+    col_count = max_col - min_col + 1
+    non_empty = 0
+    numeric_count = 0
+    formula_count = 0
+    numeric_vals: list[float] = []
+
+    for row in range(min_row, max_row + 1):
+        for col in range(min_col, max_col + 1):
+            val = ws.cell(row=row, column=col).value
+            if val is not None:
+                non_empty += 1
+            if isinstance(val, str) and val.startswith("="):
+                formula_count += 1
+            elif isinstance(val, (int, float)) and not isinstance(val, bool):
+                numeric_count += 1
+                numeric_vals.append(float(val))
+
+    stats: dict[str, Any] = {
+        "ref": f"{sheet_name}!{ref}",
+        "row_count": row_count,
+        "col_count": col_count,
+        "non_empty_count": non_empty,
+        "numeric_count": numeric_count,
+        "formula_count": formula_count,
+    }
+    if numeric_vals:
+        stats["min"] = min(numeric_vals)
+        stats["max"] = max(numeric_vals)
+        stats["sum"] = sum(numeric_vals)
+        stats["avg"] = sum(numeric_vals) / len(numeric_vals)
+
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# range clear
+# ---------------------------------------------------------------------------
+def range_clear(
+    ctx: WorkbookContext,
+    sheet_name: str,
+    ref: str,
+    *,
+    contents: bool = True,
+    formats: bool = False,
+) -> ChangeRecord:
+    """Clear a range of cells."""
+    ws = ctx.get_sheet(sheet_name)
+    min_row, min_col, max_row, max_col = _parse_ref(ref)
+
+    cells_cleared = 0
+    for row in range(min_row, max_row + 1):
+        for col in range(min_col, max_col + 1):
+            cell = ws.cell(row=row, column=col)
+            if contents:
+                cell.value = None
+            if formats:
+                cell.number_format = "General"
+            cells_cleared += 1
+
+    return ChangeRecord(
+        type="range.clear",
+        target=f"{sheet_name}!{ref}",
+        after={"cells_cleared": cells_cleared, "contents": contents, "formats": formats},
+        impact={"cells": cells_cleared},
+    )
+
+
+# ---------------------------------------------------------------------------
+# format width
+# ---------------------------------------------------------------------------
+def format_width(
+    ctx: WorkbookContext,
+    sheet_name: str,
+    columns: list[str],
+    width: float,
+) -> ChangeRecord:
+    """Set column widths."""
+    ws = ctx.get_sheet(sheet_name)
+    for col_letter in columns:
+        ws.column_dimensions[col_letter].width = width
+
+    return ChangeRecord(
+        type="format.width",
+        target=f"{sheet_name}![{','.join(columns)}]",
+        after={"columns": columns, "width": width},
+        impact={"cells": len(columns)},
+    )
+
+
+# ---------------------------------------------------------------------------
+# format freeze
+# ---------------------------------------------------------------------------
+def format_freeze(
+    ctx: WorkbookContext,
+    sheet_name: str,
+    ref: str | None,
+) -> ChangeRecord:
+    """Freeze panes at a given cell ref, or unfreeze if ref is None."""
+    ws = ctx.get_sheet(sheet_name)
+    old_freeze = ws.freeze_panes
+    ws.freeze_panes = ref
+
+    return ChangeRecord(
+        type="format.freeze",
+        target=f"{sheet_name}",
+        before=old_freeze,
+        after=ref,
+        impact={"cells": 0},
+    )

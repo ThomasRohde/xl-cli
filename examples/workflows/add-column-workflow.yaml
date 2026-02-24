@@ -1,0 +1,30 @@
+schema_version: "1.0"
+name: "add-gross-margin-column"
+target:
+  file: "budget.xlsx"
+
+defaults:
+  output: json
+  recalc: cached
+  dry_run: false
+
+steps:
+  - id: inspect_tables
+    run: table.ls
+    args:
+      sheet: "Revenue"
+
+  - id: add_margin
+    run: table.add_column
+    args:
+      table: "Sales"
+      name: "Margin"
+      formula: "=[@Sales]-[@Cost]"
+
+  - id: verify_column
+    run: verify.assert
+    args:
+      assertions:
+        - type: table.column_exists
+          table: Sales
+          column: Margin

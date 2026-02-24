@@ -1,0 +1,33 @@
+schema_version: "1.0"
+name: "inspect-and-validate"
+target:
+  file: "budget.xlsx"
+
+defaults:
+  output: json
+  recalc: cached
+  dry_run: false
+
+steps:
+  - id: inspect
+    run: wb.inspect
+    args: {}
+
+  - id: list_tables
+    run: table.ls
+    args:
+      sheet: "Revenue"
+
+  - id: verify_structure
+    run: verify.assert
+    args:
+      assertions:
+        - type: table.column_exists
+          table: Sales
+          column: Region
+        - type: table.column_exists
+          table: Sales
+          column: Sales
+        - type: table.row_count
+          table: Sales
+          min: 1

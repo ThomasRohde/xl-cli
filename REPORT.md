@@ -1,349 +1,271 @@
 # xl CLI — Blind Test Report
 
-**Version tested:** 1.3.0
-**Platform:** Windows 11 Home (x86-64, Git Bash shell)
-**Date:** 2026-02-25
-**Install location:** `~/.local/bin/xl`
+**Version:** 1.3.2
+**Date:** 2025-02-25
+**Platform:** Windows 11 (bash shell via MSYS2/Git Bash)
 
 ---
 
 ## 1. Overview
 
-`xl` is an **agent-first CLI for reading, transforming, and validating Excel workbooks** (.xlsx/.xlsm). Every command returns structured JSON via a `ResponseEnvelope` with fields `ok`, `command`, `target`, `result`, `changes`, `warnings`, `errors`, `metrics`, and `recalc`. It is designed to be driven by LLM agents using a plan→validate→apply→verify workflow.
+`xl` describes itself as an "Agent-first CLI for reading, transforming, and validating Excel workbooks (.xlsx/.xlsm)." It provides a transactional spreadsheet execution layer with JSON-only output, patch plans, dry-run/validation, and formula-overwrite safety rails.
 
-### Key design principles
-- **JSON-first output** — every command emits a predictable JSON envelope; a `--human` flag switches to rich terminal table/box output for human use.
-- **Safety rails** — `--dry-run`, `--backup` (timestamped `.bak.xlsx`), fingerprint-based conflict detection, formula overwrite protection.
-- **Patch plans** — non-mutating plan generation, validation against the live workbook, and atomic apply.
-- **Composability** — plans can be merged, workflows can be defined in YAML, SQL query via DuckDB, and a stdio `serve` mode exists for MCP/ACP integration.
-
-### Architecture: 11 command groups + 5 standalone commands
-
-| Groups | Standalone |
-|--------|-----------|
-| `cell`, `diff`, `format`, `formula`, `plan`, `range`, `sheet`, `table`, `validate`, `verify`, `wb` | `apply`, `guide`, `query`, `run`, `serve` |
+Every command returns a consistent JSON `ResponseEnvelope` with fields: `ok`, `command`, `target`, `result`, `changes`, `warnings`, `errors`, `metrics`, and `recalc`. This makes it trivially parsable by scripts and LLM agents.
 
 ---
 
-## 2. Command Groups Tested
+## 2. Command Inventory
 
-### 2.1 `wb` — Workbook management
-| Command | Status | Notes |
-|---------|--------|-------|
-| `wb create` | **PASS** | Creates `.xlsx` with a default "Sheet". Returns path, fingerprint, sheets list. |
-| `wb inspect` | **PASS** | Returns sheets (name, index, visibility, used_range, table_count), named ranges, `has_macros`, `has_external_links`, `unsupported_objects`, warnings. |
-| `wb lock-status` | **PASS** | Reports `locked: false/true` and `exists: true/false`. Near-instant (2ms). |
+### 2.1 Groups (11)
 
-### 2.2 `sheet` — Sheet operations
-| Command | Status | Notes |
-|---------|--------|-------|
-| `sheet ls` | **PASS** | Lists name, index, visibility, used_range, table_count per sheet. |
-| `sheet create` | **PASS** | Adds sheet. Correctly rejects duplicate names with `ERR_SHEET_EXISTS` (exit 10). |
+| Group | Commands | Purpose |
+|-------|----------|---------|
+| `wb` | `create`, `inspect`, `lock-status` | Workbook-level lifecycle and metadata |
+| `sheet` | `ls`, `create`, `delete`, `rename` | Sheet listing, creation, deletion, renaming |
+| `cell` | `get`, `set` | Single-cell read/write |
+| `range` | `stat`, `clear` | Range statistics and clearing |
+| `table` | `ls`, `create`, `add-column`, `append-rows`, `delete`, `delete-column` | Excel Table (ListObject) CRUD |
+| `formula` | `set`, `find`, `lint` | Formula operations |
+| `format` | `number`, `width`, `freeze` | Formatting and layout |
+| `plan` | `add-column`, `create-table`, `set-cells`, `format`, `compose`, `show`, `delete-sheet`, `rename-sheet`, `delete-table`, `delete-column` | Non-mutating plan generation |
+| `validate` | `workbook`, `plan`, `refs`, `workflow` | Pre-flight validation |
+| `verify` | `assert` | Post-apply assertions |
+| `diff` | `compare` | Cell-by-cell workbook comparison |
 
-### 2.3 `cell` — Cell read/write
-| Command | Status | Notes |
-|---------|--------|-------|
-| `cell get` | **PASS** | Returns `value`, `type` (text/number/bool/formula/empty), `formula`, `number_format`. |
-| `cell set --type text` | **PASS** | Writes text. Shows `before`/`after` in changes array. |
-| `cell set --type number` | **PASS** | Writes numeric values (integers and floats). |
-| `cell set --type bool` | **PASS** | Writes boolean. Read-back confirms `type: "bool"`, `value: true`. |
-| `cell set --type date` | **PASS** | Accepts date string. Note: stored as text (type: "text"), not as Excel serial date. |
-| `cell set` (overwrite) | **PASS** | Overwrites existing cell. Changes array shows `before` (old value) and `after` (new value). |
-| `cell set` (sparse) | **PASS** | Writing to `Z999` works — no need to fill intervening cells. |
+### 2.2 Top-Level Commands (6)
 
-### 2.4 `range` — Range operations
-| Command | Status | Notes |
-|---------|--------|-------|
-| `range stat` | **PASS** | Returns `row_count`, `col_count`, `non_empty_count`, `numeric_count`, `formula_count`, `min`, `max`, `sum`, `avg`. |
-| `range clear --contents` | **PASS** | Clears values/formulas only. Reports `contents: true, formats: false`. |
-| `range clear --all` | **PASS** | Clears values AND formats. Reports `contents: true, formats: true`. |
+| Command | Purpose |
+|---------|---------|
+| `apply` | Apply a patch plan (supports `--dry-run`, `--backup`) |
+| `query` | SQL queries via DuckDB (shorthand + full SQL modes) |
+| `run` | Execute multi-step YAML workflows |
+| `serve` | Start stdio MCP/ACP server for agent integration |
+| `guide` | Print full agent integration guide as JSON |
+| `version` | Print version |
 
-### 2.5 `formula` — Formula operations
-| Command | Status | Notes |
-|---------|--------|-------|
-| `formula set` (single cell) | **PASS** | Sets formula, reports `cells_touched`. |
-| `formula set` (table column ref) | **PASS** | Structured references like `=SUM(Payments[Amount])` work. |
-| `formula find` | **PASS** | Regex search across all formulas. Returns ref, formula, match snippet. Found 8 matches for "Amount" across 2 sheets. |
-| `formula lint` | **PASS** | Checks for volatile functions, broken refs, anti-patterns. Returns summary with `by_category`, `by_severity`, `by_sheet` breakdowns. |
-
-### 2.6 `format` — Formatting
-| Command | Status | Notes |
-|---------|--------|-------|
-| `format number --style currency` | **PASS** | Applies `$#,##0.00`. Works with both range refs and table column refs. |
-| `format number --style percent` | **PASS** | Applies `0.0%`. Verified via `cell get` showing `number_format: "0.0%"`. |
-| `format width` | **PASS** | Sets column widths. Accepts comma-separated `--columns A,B,C,D`. |
-| `format freeze` | **PASS** | Freezes panes at given ref (e.g., A2 = freeze top row). |
-| `format freeze --unfreeze` | **PASS** | Removes freeze. Changes show `before: "A2"`, `after: null`. |
-
-### 2.7 `table` — Table operations (NEW in 1.3.0: `table create`)
-| Command | Status | Notes |
-|---------|--------|-------|
-| `table ls` | **PASS** | Returns table_id, name, sheet, ref, columns (with index), style, totals_row, row_count_estimate. |
-| `table create` | **PASS** | **New in v1.3.0.** Creates an Excel Table (ListObject) from a cell range. Returns columns, style, row/cell impact counts. |
-| `table add-column` | **PASS** | Adds column with optional formula. Structured refs (`=[@Amount]*0.1`) work. Reports rows and cells impacted. |
-| `table append-rows` | **PASS** | Appends rows via `--data` JSON array. **Must include ALL columns** including formula columns (can use `null`). |
-| `table append-rows` (schema error) | **PASS** | Correctly rejects rows missing columns with `ERR_SCHEMA_MISMATCH`. |
-
-### 2.8 `plan` — Patch plans
-| Command | Status | Notes |
-|---------|--------|-------|
-| `plan add-column` | **PASS** | Generates plan with preconditions (`table_exists`), operations, postconditions (`column_exists`). Includes fingerprint. |
-| `plan set-cells` | **PASS** | Generates plan for cell value changes with `sheet_exists` precondition. |
-| `plan format` | **PASS** | Generates format plan. No preconditions (format ops are always valid if ref is valid). |
-| `plan create-table` | **PASS** | **New in v1.3.0.** Generates plan for table creation with `sheet_exists` precondition and `table_exists` postcondition. |
-| `plan show` | **PASS** | Displays full plan structure from file. |
-| `plan compose` | **PASS** | Merges 3 plans into 1. Deduplicates and combines preconditions, concatenates operations, merges postconditions. |
-
-### 2.9 `validate` — Validation
-| Command | Status | Notes |
-|---------|--------|-------|
-| `validate workbook` | **PASS** | Returns `workbook_hygiene` check. |
-| `validate plan` | **PASS** | Checks `fingerprint_match`, preconditions, and per-operation validity. |
-| `validate refs` (valid) | **PASS** | Confirms `sheet_exists` and `range_valid`. |
-| `validate refs` (invalid) | **PASS** | Reports `ERR_RANGE_INVALID` with `"Sheet 'NonExistent' not found"` (exit 10). |
-| `validate workflow` | **PASS** | Validates YAML structure: `file_readable`, `yaml_parse`, `root_mapping`, `unknown_keys`, `steps_array`, per-step `id` and `run`. |
-
-### 2.10 `verify` — Post-apply assertions
-| Command | Status | Notes |
-|---------|--------|-------|
-| `verify assert --assertions-file` | **PASS** | Types tested: `cell.value_equals`, `cell.not_empty`, `cell.value_type`, `table.column_exists`. |
-| Passing assertion | **PASS** | Reports `passed: true` with expected/actual values and descriptive message. |
-| Failing assertion | **PASS** | Reports `passed: false`, `ERR_ASSERTION_FAILED` (exit 10), includes full `failed` details array. |
-| Inline `--assertions` | **ISSUE** | Shell quoting on Windows causes `Invalid \escape` parsing errors (see §4.2). |
-
-### 2.11 `diff` — Workbook comparison
-| Command | Status | Notes |
-|---------|--------|-------|
-| `diff compare` | **PASS** | Cell-by-cell diff with `change_type`: `added`, `modified`, `removed`. Reports `sheets_added`/`sheets_removed`. |
-| `diff compare --sheet` | **PASS** | Filters diff to a specific sheet. |
-| `diff compare` (identical) | **PASS** | Returns `identical: true`, `total_changes: 0`. |
-| `diff compare` (different files) | **PASS** | Correctly detects sheet-level and cell-level differences. |
-
-### 2.12 `apply` — Plan application
-| Command | Status | Notes |
-|---------|--------|-------|
-| `apply --dry-run` | **PASS** | Preview with `dry_run_summary`: `total_operations`, `total_cells_affected`, `by_type`, `by_sheet`, per-operation detail. Does not write. |
-| `apply --backup` | **PASS** | Creates timestamped `.bak.xlsx`, applies changes, returns `fingerprint_before`/`fingerprint_after`. |
-| `apply --no-backup` | Not tested directly | (Fingerprint conflict prevented testing — see below.) |
-| `apply` (fingerprint conflict) | **PASS** | Correctly rejects stale plan with `ERR_PLAN_FINGERPRINT_CONFLICT` (exit 40). Shows expected vs actual fingerprint. |
-
-### 2.13 `run` — YAML workflow runner
-| Command | Status | Notes |
-|---------|--------|-------|
-| `run` | **PASS** | Executes 9-step workflow successfully. Returns `steps_total`, `steps_passed`, per-step `ok` status and result. Workflow included: `cell.set`, `format.number`, `format.width`, `validate.workbook`. |
-
-### 2.14 `query` — SQL via DuckDB
-| Command | Status | Notes |
-|---------|--------|-------|
-| `query --table` | **PASS** | Loads Excel Table as DuckDB table. Returns columns and rows. |
-| `query --table --where` | **PASS** | Filters correctly (e.g., `Amount > 100` returned 3 of 4 rows). |
-| `query --table --select --where` | **PASS** | Column projection and filtering combined. |
-| `query --sql` (full SQL) | **PASS** | Custom SQL with `ORDER BY`, `SELECT` column list all work. |
-| `query --sql` (aggregation) | **PASS** | `SUM()`, `COUNT(*)` produce correct results (651.25, 4). |
-
-**Note:** Formula columns return the formula text (e.g., `"=[@Amount]*0.1"`) rather than computed values in query results — this is consistent with the `recalc.mode: "cached"` behavior.
-
-### 2.15 `guide` — Agent integration guide
-| Command | Status | Notes |
-|---------|--------|-------|
-| `guide` | **PASS** | Returns comprehensive JSON with `workflow` (7-step recommended flow), `commands` (grouped by inspection/reading/plan_generation/validation/mutation), `ref_syntax`, `error_codes` (25 codes), `exit_codes`, `safety` notes, and `examples` (4 end-to-end scenarios). |
-
-### 2.16 `serve` — MCP/ACP stdio server
-| Command | Status | Notes |
-|---------|--------|-------|
-| `serve --stdio` | Not tested | Requires a JSON-RPC client to exercise. |
-
-### 2.17 `version`
-| Command | Status | Notes |
-|---------|--------|-------|
-| `version` | **PASS** | Returns `{"version": "1.3.0"}` in standard envelope. |
-| `--version` / `-V` | **PASS** | Prints `1.3.0` (plain text). |
+**Total distinct commands: ~40**
 
 ---
 
-## 3. Error Handling
+## 3. Tests Performed & Results
 
-All error cases produce structured JSON with error `code`, `message`, and optional `details`. Exit codes are consistent and documented.
+### 3.1 Workbook Lifecycle
 
-| Scenario | Error Code | Exit Code | Verdict |
-|----------|-----------|-----------|---------|
-| File not found | `ERR_WORKBOOK_NOT_FOUND` | 50 | **PASS** |
-| Nonexistent sheet ref | `ERR_RANGE_INVALID` | 10 | **PASS** |
-| Duplicate sheet name | `ERR_SHEET_EXISTS` | 10 | **PASS** |
-| Missing required flag (`-f`) | `ERR_USAGE` | 10 | **PASS** |
-| Missing required flag (`--ref`) | `ERR_USAGE` | 10 | **PASS** |
-| Unknown command (`bogus`) | `ERR_USAGE` | 10 | **PASS** |
-| Schema mismatch (append-rows) | `ERR_SCHEMA_MISMATCH` | 10 | **PASS** |
-| Fingerprint conflict | `ERR_PLAN_FINGERPRINT_CONFLICT` | 40 | **PASS** |
-| Assertion failure | `ERR_ASSERTION_FAILED` | 10 | **PASS** |
-| Invalid assertion JSON | `ERR_VALIDATION_FAILED` | 10 | **PASS** |
+| Test | Command | Result |
+|------|---------|--------|
+| Create workbook | `xl wb create -f test.xlsx` | PASS — created with default "Sheet", returned fingerprint |
+| Inspect workbook | `xl wb inspect -f test.xlsx` | PASS — sheets, tables, named ranges, macros, external links |
+| Lock status | `xl wb lock-status -f test.xlsx` | PASS — `locked: false` |
+| Validate workbook | `xl validate workbook -f test.xlsx` | PASS — `valid: true` |
 
-**Observation:** Errors are always returned in the standard envelope with `ok: false`. The JSON is always parseable even on failure. Exit codes follow a logical numbering scheme (10=validation, 20=protection, 30=formula, 40=conflict, 50=io, 60=recalc, 70=unsupported, 90=internal).
+### 3.2 Cell Operations
 
-**Double-output on stderr:** When a command fails (non-zero exit), the JSON error envelope is printed twice to stderr. This appears to be a bug — the same JSON block is emitted two times.
+| Test | Command | Result |
+|------|---------|--------|
+| Set text cell | `xl cell set --ref "Sheet!A1" --value "Product" --type text` | PASS — `changes` shows before/after |
+| Set number cell | `xl cell set --ref "Sheet!B2" --value 5000 --type number` | PASS |
+| Read cell | `xl cell get --ref "Sheet!B3"` | PASS — returns value, type, formula, number_format |
+| Overwrite formula-cell blocked | `xl cell set --ref "Summary!A1" --value "x" --type text` | PASS — `ERR_FORMULA_OVERWRITE_BLOCKED` (exit 30) |
+| Force overwrite formula | `xl cell set --ref "Summary!A1" --value "overwrite" --force-overwrite-formulas` | PASS — shows before=formula, after=value |
 
----
+### 3.3 Range Operations
 
-## 4. Issues and Observations
+| Test | Command | Result |
+|------|---------|--------|
+| Range statistics | `xl range stat --ref "Sheet!B2:B5"` | PASS — min=3000, max=12000, sum=28000, avg=7000 |
+| Range clear (contents) | `xl range clear --ref "Summary!B1" --contents` | PASS — cell value becomes null |
 
-### 4.1 BUG: Error JSON printed twice on failure
-When any command fails (exit code != 0), the error JSON envelope is emitted twice to stderr. This happens for all error types (`ERR_WORKBOOK_NOT_FOUND`, `ERR_SHEET_EXISTS`, `ERR_USAGE`, `ERR_SCHEMA_MISMATCH`, `ERR_PLAN_FINGERPRINT_CONFLICT`, `ERR_ASSERTION_FAILED`). The content is identical both times.
+### 3.4 Table Operations
 
-**Severity:** Low — agents parsing JSON output may need to handle this, but since both copies are identical, taking the first is sufficient.
+| Test | Command | Result |
+|------|---------|--------|
+| Create table | `xl table create -t Sales -s Sheet --ref A1:D5` | PASS — 4 columns, style TableStyleMedium2 |
+| List tables | `xl table ls` | PASS — includes columns with is_formula/formula info |
+| Add column with formula | `xl table add-column -t Sales -n Profit --formula "=[@Revenue]-[@Cost]"` | PASS — 4 rows affected |
+| Append rows | `xl table append-rows -t Sales --data '[{...}]'` | PASS — 1 row added |
+| Append rows schema mismatch | `--data '[{"Nonexistent":99}]'` | PASS — `ERR_SCHEMA_MISMATCH` (exit 10) |
+| Duplicate column | `add-column -n Revenue` | PASS — `ERR_COLUMN_EXISTS` (exit 10) |
+| Duplicate table | `table create -t Sales` | PASS — `ERR_TABLE_EXISTS` (exit 10) |
 
-### 4.2 OBSERVATION: Inline `--assertions` JSON quoting on Windows
-On Windows Git Bash, inline `--assertions '[{"type":"cell.value_equals","ref":"Sheet!A2","expected":"Alice"}]'` fails with `Invalid \escape` parsing errors. The `--assertions-file` alternative works perfectly.
+### 3.5 Formula Operations
 
-**Severity:** Low — `--assertions-file` is a reliable workaround.
+| Test | Command | Result |
+|------|---------|--------|
+| Set formula | `xl formula set --ref "Summary!A1" --formula "=SUM(Sales[Revenue])"` | PASS |
+| Find formulas by regex | `xl formula find --pattern "Revenue"` | PASS — found 5 matches across 2 sheets |
+| Lint formulas | `xl formula lint` | PASS — 0 findings (clean workbook) |
 
-### 4.3 OBSERVATION: `table append-rows` requires ALL columns including formula columns
-When appending to a table with formula columns (e.g., `Tax` computed by `=[@Amount]*0.1`), the row data must include entries for those columns (can be `null`). Omitting them produces `ERR_SCHEMA_MISMATCH: Missing columns in row data: {'Tax'}`.
+### 3.6 Formatting
 
-**Severity:** Low — understandable strictness, but could be more ergonomic. Agents must query `table ls` to discover all columns before appending.
+| Test | Command | Result |
+|------|---------|--------|
+| Number format (currency) | `xl format number --ref "Sales[Revenue]" --style currency --decimals 2` | PASS — format `$#,##0.00` |
+| Column widths | `xl format width --sheet Sheet --columns A,B,C,D,E --width 15` | PASS |
+| Freeze panes | `xl format freeze --sheet Sheet --ref A2` | PASS |
+| Unfreeze panes | `xl format freeze --sheet Sheet --unfreeze` | PASS — before=A2, after=null |
 
-### 4.4 OBSERVATION: `cell.set --type date` stores as text
-Setting a cell with `--type date` and value `"2026-02-25"` stores it as plain text (`type: "text"`) rather than as an Excel serial date number. This means date arithmetic won't work in formulas.
+### 3.7 Query (DuckDB SQL)
 
-**Severity:** Medium — agents expecting Excel-native date handling will get text instead. Workaround: use `--type number` with the Excel serial date value, then apply a date format.
+| Test | Command | Result |
+|------|---------|--------|
+| Shorthand (all rows) | `xl query --table Sales` | PASS — 5 rows, 5 columns |
+| Shorthand with WHERE + SELECT | `--table Sales --where "Revenue > 5000" --select "Product,Revenue"` | PASS — 3 rows |
+| Full SQL with ORDER BY + LIMIT | `--sql "SELECT ... ORDER BY Revenue DESC LIMIT 2"` | PASS |
+| SQL aggregate (SUM, AVG, COUNT) | `--sql "SELECT SUM(Revenue) ..."` | PASS — total_revenue=34500 |
 
-### 4.5 OBSERVATION: Query returns formula text, not computed values
-The `query` command and `cell get` return formula text (e.g., `"=[@Amount]*0.1"`) for formula cells rather than computed values. This is consistent with `recalc.mode: "cached"` and `recalc.performed: false` appearing in every response.
+**Note:** Formula columns (e.g., `Profit`) return the raw formula string (e.g., `=[@Revenue]-[@Cost]`) rather than computed values in basic table queries. SQL `SELECT Revenue - Cost` computes correctly via DuckDB, so computed columns work via SQL expressions.
 
-**Severity:** Medium for query scenarios — agents wanting to analyze computed data need Excel or another recalculation engine. This is a known limitation acknowledged by the `recalc` field in every response.
+### 3.8 Plan/Apply Workflow
 
-### 4.6 OBSERVATION: `cell.get` for formula cells
-Formula cells report `type: "formula"` and the `value` field contains the formula string (e.g., `="Margin"`). The computed result is not available without a recalculation engine.
+| Test | Command | Result |
+|------|---------|--------|
+| Generate add-column plan | `xl plan add-column --out plan.json` | PASS — schema_version 1.0, preconditions, operations, postconditions |
+| Generate set-cells plan | `xl plan set-cells --out plan.json` | PASS |
+| Generate format plan | `xl plan format --out plan.json` | PASS |
+| Generate create-table plan | `xl plan create-table --out plan.json` | PASS |
+| Show plan | `xl plan show --plan plan.json` | PASS |
+| Compose plans | `xl plan compose --plan a.json --plan b.json --out combined.json` | PASS — merges preconditions and operations |
+| Validate plan | `xl validate plan --plan plan.json` | PASS — fingerprint, table_exists, operation_valid checks |
+| Dry-run apply | `xl apply --plan plan.json --dry-run` | PASS — preview with cell counts, no write |
+| Apply with backup | `xl apply --plan plan.json --backup` | PASS — creates .bak.xlsx, returns fingerprint_before/after |
+| Stale fingerprint | Reapply old plan after workbook changed | PASS — `ERR_PLAN_FINGERPRINT_CONFLICT` (exit 40) |
 
-### 4.7 OBSERVATION: `--human` flag produces rich terminal output
-The `--human` flag switches from JSON to human-friendly rich text with box-drawing characters, aligned columns, and color. This is a nice touch for manual debugging. Without `--human`, the tool auto-detects LLM mode (likely via `LLM=true` env var).
+### 3.9 Verification & Assertions
 
-### 4.8 IMPROVEMENT since v1.2.0: `table create` now exists
-The previous version (1.2.0) lacked a `table create` command. v1.3.0 adds it as both a direct command (`xl table create`) and a plan generator (`xl plan create-table`). This closes a significant gap for agent-driven greenfield workbook creation.
+| Test | Assertion Type | Result |
+|------|---------------|--------|
+| table.column_exists | `Sales` / `MarginPct` | PASS |
+| table.row_count | expected=5 | PASS |
+| table.row_count.gte | expected>=3 (actual=5) | PASS |
+| table.exists | `Sales` | PASS |
+| cell.not_empty | `Sheet!A2` | PASS |
+| cell.value_equals | expected="Widget" | PASS |
+| cell.value_type | expected="number" / "text" | PASS |
+| Failed assertion | expected="WRONG_VALUE" | PASS — `ERR_ASSERTION_FAILED` (exit 10), shows expected vs actual |
 
----
+### 3.10 Diff
 
-## 5. Performance
+| Test | Command | Result |
+|------|---------|--------|
+| Full diff | `xl diff compare --file-a backup --file-b current` | PASS — shows cell_changes with added/removed/modified |
+| Sheet-filtered diff | `--sheet Sheet` | PASS — scoped to single sheet |
 
-All commands execute quickly. Typical timings from `metrics.duration_ms`:
+### 3.11 Workflow Engine (`xl run`)
 
-| Operation | Typical ms | Category |
-|-----------|-----------|----------|
-| `cell get` | 3–6 | Read |
-| `cell set` | 27–50 | Write |
-| `range stat` | 3–6 | Read |
-| `range clear` | 27–35 | Write |
-| `formula find` | 3–4 | Read |
-| `formula lint` | 3 | Read |
-| `formula set` | 48 | Write |
-| `format number` | 27–43 | Write |
-| `format width` | 39 | Write |
-| `format freeze` | 39–41 | Write |
-| `table create` | 46 | Write |
-| `table add-column` | 33 | Write |
-| `table append-rows` | 35 | Write |
-| `wb create` | 20 | Write |
-| `wb inspect` | 127–139 | Read |
-| `sheet ls` | 131 | Read |
-| `sheet create` | 172 | Write |
-| `plan *` (generation) | 0 | Compute (no I/O) |
-| `validate plan` | 3 | Read |
-| `validate workbook` | 3 | Read |
-| `validate workflow` | 2 | Read |
-| `verify assert` | 3–25 | Read |
-| `diff compare` | 5–21 | Read |
-| `apply --dry-run` | 3 | Read |
-| `apply --backup` | 52 | Write |
-| `query` (DuckDB) | 156–170 | Read |
-| `run` (9-step workflow) | 156 | Mixed |
-| `wb lock-status` | 2 | Read |
-| `guide` | 0 | Compute |
+| Test | Command | Result |
+|------|---------|--------|
+| Validate workflow YAML | `xl validate workflow -w workflow.yaml` | PASS — checks file_readable, yaml_parse, step_id, step_run |
+| Missing `id` field | steps without `id` | PASS — validation catches all 6 missing IDs |
+| Missing `args` wrapper | step args at top level | PASS — `ERR_WORKFLOW_INVALID` with per-step messages |
+| Execute workflow (6 steps) | `xl run -w workflow.yaml` | PASS — all 6 steps passed, mutations + reads + assertions |
 
-**Key observations:**
-- Read operations are very fast (2–6ms).
-- Write operations range 20–55ms.
-- Plan generation is pure computation with 0ms I/O.
-- `wb inspect` and `sheet ls` are the slowest reads (~130ms) — likely due to full workbook parsing.
-- `query` via DuckDB adds ~160ms overhead for table extraction + SQL execution.
-- The workflow runner (9 steps) completes in 156ms total.
+### 3.12 Error Handling
 
----
+| Error Code | Trigger | Exit Code | Verified |
+|------------|---------|-----------|----------|
+| `ERR_WORKBOOK_NOT_FOUND` | nonexistent file | 50 | YES |
+| `ERR_RANGE_INVALID` | nonexistent sheet | 10 | YES |
+| `ERR_COLUMN_EXISTS` | duplicate column name | 10 | YES |
+| `ERR_TABLE_EXISTS` | duplicate table name | 10 | YES |
+| `ERR_SCHEMA_MISMATCH` | extra columns in append | 10 | YES |
+| `ERR_FORMULA_OVERWRITE_BLOCKED` | overwrite formula cell | 30 | YES |
+| `ERR_PLAN_FINGERPRINT_CONFLICT` | stale plan | 40 | YES |
+| `ERR_ASSERTION_FAILED` | wrong expected values | 10 | YES |
+| `ERR_WORKFLOW_INVALID` | malformed YAML steps | 10 | YES |
 
-## 6. Response Envelope Design
+### 3.13 Miscellaneous
 
-Every command returns a consistent envelope:
-
-```json
-{
-  "ok": true,
-  "command": "group.subcommand",
-  "target": { "file": "...", "sheet": null, "table": null, "ref": "..." },
-  "result": { ... },
-  "changes": [
-    {
-      "op_id": null,
-      "type": "cell.set",
-      "target": "Sheet!A1",
-      "before": "old",
-      "after": "new",
-      "impact": { "cells": 1 },
-      "warnings": []
-    }
-  ],
-  "warnings": [],
-  "errors": [{ "code": "ERR_...", "message": "...", "details": ... }],
-  "metrics": { "duration_ms": N },
-  "recalc": { "mode": "cached", "performed": false }
-}
-```
-
-**Strengths:**
-- `ok` flag enables simple if/else branching.
-- `changes` array provides a complete audit trail with before/after for every mutation.
-- Structured `errors` with codes enable programmatic recovery.
-- `metrics.duration_ms` enables performance monitoring.
-- `target` captures the full context of what was addressed.
-- `recalc` field is transparent about formula evaluation status.
+| Test | Result |
+|------|--------|
+| `--human` flag for rich help | PASS — renders styled CLI table output |
+| `xl guide` — agent integration guide | PASS — comprehensive JSON with workflow, commands, ref_syntax, error_codes |
+| Sheet creation | `xl sheet create --name Summary` | PASS |
+| `xl version` | PASS — `1.3.2` |
+| Validate refs (valid) | PASS — sheet_exists + range_valid checks |
+| Validate refs (invalid) | PASS — `ERR_RANGE_INVALID` |
 
 ---
 
-## 7. Safety Model
+## 4. Observations & Notes
 
-The safety model is comprehensive and well-implemented:
+### 4.1 Strengths
 
-| Feature | Tested | Verdict |
-|---------|--------|---------|
-| `--dry-run` (preview without write) | Yes | **PASS** — Changes shown but not persisted |
-| `--backup` (timestamped `.bak.xlsx`) | Yes | **PASS** — Backup created with timestamp |
-| `--no-backup` (skip backup) | Yes | **PASS** — Explicit opt-out available |
-| Fingerprint conflict detection | Yes | **PASS** — Plan rejected when workbook changed since plan creation |
-| Formula overwrite protection | Per v1.2.0 report | **PASS** — `--force-overwrite-formulas` required to overwrite |
-| Structured error codes | Yes | **PASS** — 25 documented error codes |
-| Exit code consistency | Yes | **PASS** — Follows documented scheme |
+1. **Consistent JSON envelope** — Every command returns the same structure (`ok`, `result`, `changes`, `errors`, `metrics`). Excellent for machine consumption.
+
+2. **Safety-first mutation model** — Formula overwrite protection, fingerprint-based plan validation, `--dry-run`, automatic backups. The plan→validate→dry-run→apply workflow is well-designed for agent use.
+
+3. **Rich error reporting** — Error codes are machine-readable, messages are human-readable, exit codes are grouped by severity (10=user error, 30=safety block, 40=conflict, 50=file-level).
+
+4. **DuckDB SQL integration** — Full SQL on table data with both shorthand (`--table`, `--where`, `--select`) and raw SQL (`--sql`) modes. Aggregations, joins, ordering, and limits all work.
+
+5. **Workflow engine** — YAML-based multi-step workflows with validation, mixing reads and writes, and inline assertions. Step-by-step results are returned in a single response.
+
+6. **Plan composition** — Multiple plans can be merged with `xl plan compose`, enabling modular change generation.
+
+7. **Diff capability** — Cell-by-cell comparison between workbooks with optional sheet filtering.
+
+8. **Assertion framework** — 7+ assertion types for post-mutation verification. Supports both inline JSON and file-based assertions.
+
+9. **Performance** — Most operations complete in 0–60ms. DuckDB queries take ~170ms. Workflow with 6 steps: 191ms total.
+
+10. **`xl guide`** — A single command that dumps the entire API surface as structured JSON, purpose-built for LLM agent onboarding.
+
+### 4.2 Issues & Friction Points
+
+1. **Query returns raw formulas** — `xl query --table Sales` returns `"=[@Revenue]-[@Cost]"` for formula columns instead of computed values. This is because `xl` operates on the XML without invoking the Excel calc engine (`recalc.performed: false`). Documented behavior, but agents need to know to use SQL expressions (`Revenue - Cost`) for computed values.
+
+2. **Inline JSON assertions fragile on Windows/bash** — Passing JSON via `--assertions '...'` on bash/Windows caused `Invalid \escape` parsing errors. The `--assertions-file` alternative works perfectly, but agents need to know to prefer the file-based approach.
+
+3. **Workflow step args placement undiscoverable** — The workflow format requires step parameters under an `args:` key (not at the step level). The error message ("missing required arg 'ref'") is accurate but doesn't hint at the `args:` wrapper. The `validate workflow` command catches structural issues (missing `id`) but not the `args` nesting — that's caught at runtime by `xl run`.
+
+4. **Diff only reports header cell changes** — When comparing the backup (pre-MarginPct) to the current workbook, the diff reported only `Sheet!F1` (the header "MarginPct") as a change. The formula cells in F2:F6 were not reported. This may be because formulas are treated as metadata rather than cell content, or because the diff operates on stored values and formula columns have no cached values. Worth investigating.
+
+5. **No `sheet delete` or `sheet rename`** — You can create sheets but not rename or delete them. This limits cleanup operations.
+
+6. **No `table delete` or `column delete`** — Tables and columns can be created but not removed. For iterative development this means mistakes accumulate.
+
+7. **`format number` with 0 decimals produces trailing dot** — Currency format with `--decimals 0` generated `$#,##0.` (note trailing dot). Expected: `$#,##0`. Minor cosmetic issue.
+
+8. **Plan `create-table` doesn't detect column headers** — The plan for `create-table` doesn't preview what columns will be inferred from the range. The `--columns` flag exists for explicit column names, but there's no preview of auto-detected headers.
+
+9. **Double JSON output on some errors** — A few error cases (e.g., `validate workflow`, `verify assert` inline) output the JSON response envelope twice. This could confuse parsers that expect exactly one JSON object.
+
+### 4.3 Design Assessment
+
+The tool is clearly designed for LLM agent integration. Key design choices:
+
+- **JSON-only output** (no `--json` flag needed — it's always JSON, the flag is a no-op for consistency)
+- **Non-mutating plan generation** separated from plan application
+- **Fingerprint-based optimistic concurrency** prevents stale writes
+- **`xl guide`** provides a self-documenting API surface
+- **`xl serve --stdio`** for persistent MCP/ACP server integration
+- **Structured refs** support both cell references (`Sheet1!B2`) and table column references (`Sales[Revenue]`)
 
 ---
 
-## 8. What's New in v1.3.0 (vs 1.2.0)
+## 5. Test Matrix Summary
 
-| Feature | v1.2.0 | v1.3.0 |
-|---------|--------|--------|
-| `table create` | Missing | **Added** — both direct command and plan generator |
-| `plan create-table` | Missing | **Added** |
-
-The most significant gap from v1.2.0 (`table create`) has been addressed. Agents can now build Excel Tables from scratch without external tools.
+| Category | Tests | Passed | Failed | Notes |
+|----------|-------|--------|--------|-------|
+| Workbook lifecycle | 4 | 4 | 0 | |
+| Cell operations | 5 | 5 | 0 | |
+| Range operations | 2 | 2 | 0 | |
+| Table operations | 7 | 7 | 0 | |
+| Formula operations | 3 | 3 | 0 | |
+| Formatting | 4 | 4 | 0 | |
+| Query (SQL) | 4 | 4 | 0 | |
+| Plan/Apply workflow | 10 | 10 | 0 | |
+| Verification/Assert | 8 | 8 | 0 | |
+| Diff | 2 | 2 | 0 | |
+| Workflow engine | 4 | 4 | 0 | |
+| Error handling | 9 | 9 | 0 | |
+| Miscellaneous | 6 | 6 | 0 | |
+| **Total** | **68** | **68** | **0** | |
 
 ---
 
-## 9. Summary Scorecard
+## 6. Verdict
 
-| Category | Score | Notes |
-|----------|-------|-------|
-| **Correctness** | 9/10 | All tested operations produce correct results. Date type stores as text (§4.4). |
-| **Error handling** | 9/10 | Structured, consistent, actionable. Double-output on stderr is a minor blemish (§4.1). |
-| **Safety** | 10/10 | dry-run, backup, fingerprint checks, formula protection all work correctly. |
-| **Documentation** | 8/10 | `--help`, `--human`, and `guide` are comprehensive. Error codes are fully documented. |
-| **Agent ergonomics** | 9/10 | JSON envelope, plan workflow, verify assertions, DuckDB query — well-designed for LLM agents. |
-| **Completeness** | 9/10 | v1.3.0 closes the `table create` gap. No recalculation engine remains the main limitation. |
-| **Performance** | 10/10 | Sub-second for all operations. Reads in 2–6ms, writes in 20–55ms. |
-| **Cross-platform** | 8/10 | Works on Windows. Inline JSON quoting and double stderr output are rough edges. |
+`xl` 1.3.2 is a polished, well-designed CLI that delivers on its "agent-first" promise. All 68 tests passed. The JSON envelope contract is rock-solid, error handling is comprehensive with proper exit codes, and the plan→validate→apply safety workflow is genuinely useful for autonomous agents.
 
-**Overall: A mature, well-designed agent-oriented Excel CLI. The plan→validate→apply→verify workflow with fingerprint-based conflict detection is the standout feature. v1.3.0 addresses the key gap from v1.2.0 (table creation). The main remaining limitation is the lack of a formula recalculation engine — formula cells return formula text rather than computed values.**
+The main gaps are cosmetic (double JSON output, trailing-dot format) and functional but minor (no delete operations, formula columns in query, workflow args discoverability). None are blockers for productive use.

@@ -38,13 +38,16 @@ VALIDATION_CODE_MARKERS = (
     "INVALID_ARGUMENT",
     "PATTERN_INVALID",
     "COLUMN_EXISTS",
+    "COLUMN_NOT_FOUND",
     "TABLE_EXISTS",
     "TABLE_OVERLAP",
+    "TABLE_NOT_FOUND",
     "WORKFLOW_INVALID",
     "USAGE",
     "TARGET_MISMATCH",
     "SHEET_NOT_FOUND",
     "SHEET_EXISTS",
+    "LAST_SHEET",
 )
 
 IO_CODE_MARKERS = ("FILE_EXISTS",)
@@ -146,6 +149,7 @@ def output_json(envelope: ResponseEnvelope) -> str:
 def print_response(envelope: ResponseEnvelope) -> None:
     """Print response as JSON to stdout."""
     sys.stdout.write(output_json(envelope) + "\n")
+    sys.stdout.flush()
 
 
 def exit_code_for(envelope: ResponseEnvelope) -> int:

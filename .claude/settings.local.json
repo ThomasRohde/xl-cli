@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(uv run pytest tests/ -v)",
-      "Bash(uv run pytest tests/test_report_fixes.py -v -k \"verify_cell_value_type_accepts or workflow_cell_set or workflow_format_width_comma or formula_set_range_defaults\")"
+      "Bash(uv run pytest tests/test_report_fixes.py -v -k \"verify_cell_value_type_accepts or workflow_cell_set or workflow_format_width_comma or formula_set_range_defaults\")",
+      "Bash(uv run python -c \":*)",
+      "Bash(uv run pytest tests/test_report_fixes.py::test_table_delete_success -v)"
     ]
   }
 }

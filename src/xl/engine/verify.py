@@ -67,13 +67,13 @@ def _check_assertion(ctx: WorkbookContext, assertion: dict[str, Any]) -> dict[st
         min_row, _, max_row, _ = _parse_ref(tbl.ref)
         actual_count = max_row - min_row  # exclude header
         if a_type in ("row_count.gte", "table.row_count.gte"):
-            min_rows = assertion.get("min_rows", assertion.get("min"))
+            min_rows = assertion.get("min_rows", assertion.get("min", assertion.get("expected")))
             if min_rows is None:
                 return {
                     "type": a_type,
                     "passed": False,
                     "actual": actual_count,
-                    "message": "row_count.gte requires 'min_rows' (or 'min')",
+                    "message": "row_count.gte requires 'min_rows' (or 'min' or 'expected')",
                 }
             passed = actual_count >= min_rows
             return {

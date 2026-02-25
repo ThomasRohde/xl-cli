@@ -349,10 +349,11 @@ def format_number(
     if style not in _VALID_STYLES:
         raise ValueError(f"Unknown format style '{style}'. Valid: {', '.join(sorted(_VALID_STYLES))}")
 
+    dec_part = f".{'0' * decimals}" if decimals > 0 else ""
     fmt_map = {
-        "number": f"#,##0.{'0' * decimals}",
-        "percent": f"0.{'0' * decimals}%",
-        "currency": f"$#,##0.{'0' * decimals}",
+        "number": f"#,##0{dec_part}",
+        "percent": f"0{dec_part}%",
+        "currency": f"$#,##0{dec_part}",
         "date": "YYYY-MM-DD",
         "text": "@",
     }
@@ -752,4 +753,138 @@ def format_freeze(
         before=old_freeze,
         after=ref,
         impact={"cells": 0},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sheet delete / rename
+# ---------------------------------------------------------------------------
+
+def sheet_delete(
+    ctx: WorkbookContext,
+    sheet_name: str,
+) -> ChangeRecord:
+    """Delete a sheet from the workbook."""
+    if sheet_name not in ctx.wb.sheetnames:
+        raise KeyError(f"Sheet not found: {sheet_name}")
+    if len(ctx.wb.sheetnames) <= 1:
+        raise ValueError(
+            f"Cannot delete sheet '{sheet_name}': workbook must retain at least one sheet"
+        )
+    ws = ctx.wb[sheet_name]
+    used_range = ws.dimensions if ws.dimensions else None
+    ctx.wb.remove(ws)
+    return ChangeRecord(
+        type="sheet.delete",
+        target=sheet_name,
+        before={"sheet": sheet_name, "used_range": used_range},
+        after=None,
+        impact={"sheets": 1},
+    )
+
+
+def sheet_rename(
+    ctx: WorkbookContext,
+    old_name: str,
+    new_name: str,
+) -> ChangeRecord:
+    """Rename a sheet in the workbook."""
+    if old_name not in ctx.wb.sheetnames:
+        raise KeyError(f"Sheet not found: {old_name}")
+    if new_name in ctx.wb.sheetnames:
+        raise ValueError(f"Sheet '{new_name}' already exists")
+    ws = ctx.wb[old_name]
+    ws.title = new_name
+    return ChangeRecord(
+        type="sheet.rename",
+        target=old_name,
+        before={"sheet": old_name},
+        after={"sheet": new_name},
+        impact={"sheets": 1},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Table delete / column delete
+# ---------------------------------------------------------------------------
+
+def table_delete(
+    ctx: WorkbookContext,
+    table_name: str,
+) -> ChangeRecord:
+    """Delete an Excel Table definition (preserves cell data)."""
+    result = ctx.find_table(table_name)
+    if result is None:
+        raise ValueError(f"Table not found: {table_name}")
+    ws, tbl = result
+
+    ref = tbl.ref
+    col_names = [tc.name for tc in tbl.tableColumns]
+
+    # Remove table from worksheet table list (TableList is dict-like, keyed by name)
+    del ws._tables[table_name]
+
+    return ChangeRecord(
+        type="table.delete",
+        target=table_name,
+        before={"table": table_name, "ref": ref, "columns": col_names},
+        after=None,
+        impact={"tables": 1},
+    )
+
+
+def table_delete_column(
+    ctx: WorkbookContext,
+    table_name: str,
+    column_name: str,
+) -> ChangeRecord:
+    """Delete a column from an Excel Table, shifting remaining columns left."""
+    result = ctx.find_table(table_name)
+    if result is None:
+        raise ValueError(f"Table not found: {table_name}")
+    ws, tbl = result
+
+    # Find column index
+    col_idx = None
+    for i, tc in enumerate(tbl.tableColumns):
+        if tc.name == column_name:
+            col_idx = i
+            break
+    if col_idx is None:
+        raise ValueError(f"Column '{column_name}' not found in table '{table_name}'")
+
+    ref = tbl.ref
+    min_row, min_col, max_row, max_col = _parse_ref(ref)
+    target_col = min_col + col_idx
+
+    # Shift cells left from the column after the deleted one
+    for row in range(min_row, max_row + 1):
+        for col in range(target_col, max_col):
+            src = ws.cell(row=row, column=col + 1)
+            dst = ws.cell(row=row, column=col)
+            dst.value = src.value
+            dst.number_format = src.number_format
+        # Clear the last column cell
+        ws.cell(row=row, column=max_col).value = None
+        ws.cell(row=row, column=max_col).number_format = "General"
+
+    # Remove from tableColumns
+    del tbl.tableColumns[col_idx]
+
+    # Update table ref (one column narrower)
+    new_max_col_letter = get_column_letter(max_col - 1)
+    new_ref = f"{get_column_letter(min_col)}{min_row}:{new_max_col_letter}{max_row}"
+    tbl.ref = new_ref
+
+    # Re-index table column IDs
+    for i, tc in enumerate(tbl.tableColumns):
+        tc.id = i + 1
+
+    rows_affected = max_row - min_row  # data rows (excluding header)
+    return ChangeRecord(
+        type="table.delete_column",
+        target=f"{table_name}[{column_name}]",
+        before={"column": column_name, "table": table_name},
+        after=None,
+        impact={"rows": rows_affected, "cells": rows_affected + 1},
     )

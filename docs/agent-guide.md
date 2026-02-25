@@ -104,6 +104,42 @@ xl verify assert --file budget.xlsx --assertions '[
 ]'
 ```
 
+## Sheet Management
+
+```bash
+# Delete a sheet (with backup)
+xl sheet delete --file budget.xlsx --name OldSheet --backup
+
+# Rename a sheet
+xl sheet rename --file budget.xlsx --name Sheet1 --new-name Revenue
+```
+
+## Table Cleanup
+
+```bash
+# Delete a table definition (preserves cell data)
+xl table delete --file budget.xlsx --table OldTable --backup
+
+# Delete a column from a table
+xl table delete-column --file budget.xlsx --table Sales --name OldCol --backup
+```
+
+## Plan-Based Delete and Rename
+
+```bash
+# Plan sheet deletion
+xl plan delete-sheet --file budget.xlsx --sheet OldSheet --out plan.json
+
+# Plan sheet rename
+xl plan rename-sheet --file budget.xlsx --sheet Sheet1 --new-name Revenue --out plan.json
+
+# Plan table deletion
+xl plan delete-table --file budget.xlsx --table OldTable --out plan.json
+
+# Plan column deletion
+xl plan delete-column --file budget.xlsx --table Sales --column OldCol --out plan.json
+```
+
 ## Query Data with SQL
 
 ```bash

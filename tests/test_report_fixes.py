@@ -771,3 +771,601 @@ def test_formula_set_range_defaults_to_relative(simple_workbook: Path):
     assert ws["E4"].value == "=C4*D4"
     assert ws["E5"].value == "=C5*D5"
     wb.close()
+
+
+# ---------------------------------------------------------------------------
+# Bug #1 regression: Workflow format.number / formula.set with Table[Column]
+# ---------------------------------------------------------------------------
+
+
+def test_workflow_format_number_table_column_ref(simple_workbook: Path, tmp_path: Path):
+    """Bug #1: workflow format.number should resolve Sales[Sales] to cell range."""
+    wf_path = tmp_path / "wf_fmt_tbl.yaml"
+    workflow = {
+        "schema_version": "1.0",
+        "name": "fmt_table_ref",
+        "target": {"file": str(simple_workbook)},
+        "steps": [
+            {
+                "id": "fmt",
+                "run": "format.number",
+                "args": {"ref": "Sales[Sales]", "style": "currency", "decimals": 2},
+            },
+        ],
+    }
+    wf_path.write_text(yaml.safe_dump(workflow))
+
+    result = runner.invoke(app, ["run", "--workflow", str(wf_path), "--file", str(simple_workbook)])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    assert data["result"]["steps"][0]["ok"] is True
+
+
+def test_workflow_formula_set_table_column_ref(simple_workbook: Path, tmp_path: Path):
+    """Bug #1: workflow formula.set should resolve Sales[NewCol] to cell range (no header)."""
+    # First add the column via a workflow step, then set formula on it
+    wf_path = tmp_path / "wf_formula_tbl.yaml"
+    workflow = {
+        "schema_version": "1.0",
+        "name": "formula_table_ref",
+        "target": {"file": str(simple_workbook)},
+        "steps": [
+            {
+                "id": "add",
+                "run": "table.add_column",
+                "args": {"table": "Sales", "name": "Margin"},
+            },
+            {
+                "id": "set",
+                "run": "formula.set",
+                "args": {"ref": "Sales[Margin]", "formula": "=[@Sales]-[@Cost]"},
+            },
+        ],
+    }
+    wf_path.write_text(yaml.safe_dump(workflow))
+
+    result = runner.invoke(app, ["run", "--workflow", str(wf_path), "--file", str(simple_workbook)])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    assert data["result"]["steps"][0]["ok"] is True
+    assert data["result"]["steps"][1]["ok"] is True
+
+
+def test_workflow_format_number_sheet_range_still_works(simple_workbook: Path, tmp_path: Path):
+    """Bug #1 guard: existing Sheet!Range syntax must still work."""
+    wf_path = tmp_path / "wf_fmt_sheet.yaml"
+    workflow = {
+        "schema_version": "1.0",
+        "name": "fmt_sheet_ref",
+        "target": {"file": str(simple_workbook)},
+        "steps": [
+            {
+                "id": "fmt",
+                "run": "format.number",
+                "args": {"ref": "Revenue!C2:C5", "style": "number", "decimals": 2},
+            },
+        ],
+    }
+    wf_path.write_text(yaml.safe_dump(workflow))
+
+    result = runner.invoke(app, ["run", "--workflow", str(wf_path), "--file", str(simple_workbook)])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    assert data["result"]["steps"][0]["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# Bug #2 regression: table.row_count.gte should accept "expected" parameter
+# ---------------------------------------------------------------------------
+
+
+def test_verify_row_count_gte_with_expected_param(simple_workbook: Path):
+    """Bug #2: table.row_count.gte should accept 'expected' as alias for min_rows."""
+    assertions = json.dumps([
+        {"type": "table.row_count.gte", "table": "Sales", "expected": 3},
+    ])
+    result = runner.invoke(
+        app,
+        ["verify", "assert", "--file", str(simple_workbook), "--assertions", assertions],
+    )
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+    assert data["result"]["assertions"][0]["passed"] is True
+
+
+def test_verify_row_count_gte_with_expected_fails_correctly(simple_workbook: Path):
+    """Bug #2: table.row_count.gte with expected > actual should fail."""
+    assertions = json.dumps([
+        {"type": "table.row_count.gte", "table": "Sales", "expected": 999},
+    ])
+    result = runner.invoke(
+        app,
+        ["verify", "assert", "--file", str(simple_workbook), "--assertions", assertions],
+    )
+    data = _json(result.stdout)
+    assert result.exit_code == 10
+    assert data["result"]["assertions"][0]["passed"] is False
+
+
+def test_verify_row_count_gte_min_rows_still_works(simple_workbook: Path):
+    """Bug #2 guard: existing min_rows param must still work."""
+    assertions = json.dumps([
+        {"type": "table.row_count.gte", "table": "Sales", "min_rows": 4},
+    ])
+    result = runner.invoke(
+        app,
+        ["verify", "assert", "--file", str(simple_workbook), "--assertions", assertions],
+    )
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# REPORT.md v1.3.2 — Section 4.2 Issue Fixes
+# ---------------------------------------------------------------------------
+
+
+# Issue #7: format number trailing dot with 0 decimals
+def test_format_number_zero_decimals_no_trailing_dot(simple_workbook: Path):
+    """Issue #7: --decimals 0 should NOT produce a trailing dot in format string."""
+    for style, expected_no_dot in [("currency", "$#,##0"), ("number", "#,##0"), ("percent", "0%")]:
+        result = runner.invoke(app, [
+            "format", "number", "--file", str(simple_workbook),
+            "--ref", "Revenue!C2:C2", "--style", style, "--decimals", "0",
+        ])
+        data = _json(result.stdout)
+        assert result.exit_code == 0
+        fmt = data["changes"][0]["after"]["format"]
+        assert fmt == expected_no_dot, f"Style '{style}' with 0 decimals got '{fmt}', expected '{expected_no_dot}'"
+
+
+def test_format_number_positive_decimals_still_works(simple_workbook: Path):
+    """Issue #7 regression guard: --decimals 2 should still produce correct format."""
+    result = runner.invoke(app, [
+        "format", "number", "--file", str(simple_workbook),
+        "--ref", "Revenue!C2:C2", "--style", "currency", "--decimals", "2",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["changes"][0]["after"]["format"] == "$#,##0.00"
+
+
+# Issue #9: double JSON output
+def test_validate_workflow_error_single_output(simple_workbook: Path, tmp_path: Path):
+    """Issue #9: validate workflow error should output JSON exactly once."""
+    wf = tmp_path / "bad.yaml"
+    wf.write_text("not: a: valid: yaml: [workflow")
+    result = runner.invoke(app, ["validate", "workflow", "--workflow", str(wf)])
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert combined.count('"ok"') == 1
+
+
+def test_verify_assert_parse_error_single_output(simple_workbook: Path):
+    """Issue #9: verify assert with bad JSON should output exactly once."""
+    result = runner.invoke(app, [
+        "verify", "assert", "--file", str(simple_workbook),
+        "--assertions", "not valid json",
+    ])
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert combined.count('"ok"') == 1
+
+
+# Issue #2: inline JSON assertions error message
+def test_verify_assert_parse_error_suggests_file(simple_workbook: Path):
+    """Issue #2: JSON parse error should suggest --assertions-file."""
+    result = runner.invoke(app, [
+        "verify", "assert", "--file", str(simple_workbook),
+        "--assertions", "{bad json}",
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is False
+    assert "assertions-file" in data["errors"][0]["message"]
+
+
+# Issue #4: diff includes formulas by default
+def test_diff_includes_formulas_by_default(simple_workbook: Path, tmp_path: Path):
+    """Issue #4: diff compare should include formula_changes by default."""
+    import shutil
+    import openpyxl as oxl
+
+    copy_path = tmp_path / "modified.xlsx"
+    shutil.copy2(simple_workbook, copy_path)
+    wb = oxl.load_workbook(str(copy_path))
+    wb["Summary"]["B1"] = "=SUM(Revenue!C2:C4)"
+    wb.save(str(copy_path))
+    wb.close()
+
+    result = runner.invoke(app, [
+        "diff", "compare",
+        "--file-a", str(simple_workbook),
+        "--file-b", str(copy_path),
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    assert "formula_changes" in data["result"]
+
+
+def test_diff_no_formulas_flag(simple_workbook: Path, tmp_path: Path):
+    """Issue #4: --no-formulas should exclude formula_changes."""
+    import shutil
+    copy_path = tmp_path / "modified2.xlsx"
+    shutil.copy2(simple_workbook, copy_path)
+
+    result = runner.invoke(app, [
+        "diff", "compare",
+        "--file-a", str(simple_workbook),
+        "--file-b", str(copy_path),
+        "--no-formulas",
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    assert "formula_changes" not in data["result"]
+
+
+# Issue #1: query --data-only
+def test_query_data_only_flag(simple_workbook: Path):
+    """Issue #1: --data-only should not return formula strings starting with '='."""
+    result = runner.invoke(app, [
+        "query", "--file", str(simple_workbook),
+        "--table", "Sales", "--data-only",
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    # With data-only, formula cells should return cached values (or None), not formula strings
+    for row in data["result"]["rows"]:
+        for val in row.values():
+            if isinstance(val, str):
+                assert not val.startswith("="), f"Got formula string '{val}' with --data-only"
+
+
+# Issue #3: workflow args hint
+def test_validate_workflow_detects_missing_args(simple_workbook: Path, tmp_path: Path):
+    """Issue #3: validate workflow should catch missing required args."""
+    workflow = {
+        "schema_version": "1.0",
+        "name": "missing_args",
+        "target": {"file": str(simple_workbook)},
+        "steps": [{"id": "s1", "run": "cell.get", "args": {}}],
+    }
+    wf_path = tmp_path / "missing_args.yaml"
+    wf_path.write_text(yaml.safe_dump(workflow))
+
+    result = runner.invoke(app, ["validate", "workflow", "--workflow", str(wf_path)])
+    data = _json(result.stdout)
+    assert data["result"]["valid"] is False
+    failed = [c for c in data["result"]["checks"] if not c["passed"]]
+    assert any("ref" in c["message"] for c in failed)
+
+
+def test_validate_workflow_hints_misplaced_args(simple_workbook: Path, tmp_path: Path):
+    """Issue #3: when args are at step level, error should hint to move inside args:."""
+    wf_path = tmp_path / "misplaced.yaml"
+    content = yaml.safe_dump({
+        "schema_version": "1.0",
+        "name": "misplaced",
+        "target": {"file": str(simple_workbook)},
+        "steps": [{"id": "s1", "run": "cell.get", "ref": "Revenue!A1", "args": {}}],
+    })
+    wf_path.write_text(content)
+
+    result = runner.invoke(app, ["validate", "workflow", "--workflow", str(wf_path)])
+    data = _json(result.stdout)
+    assert data["result"]["valid"] is False
+    failed = [c for c in data["result"]["checks"] if not c["passed"]]
+    assert any("step level" in c["message"] for c in failed)
+
+
+def test_run_workflow_hints_misplaced_args(simple_workbook: Path, tmp_path: Path):
+    """Issue #3: xl run should also hint about misplaced args."""
+    wf_path = tmp_path / "misplaced_run.yaml"
+    content = yaml.safe_dump({
+        "schema_version": "1.0",
+        "name": "misplaced_run",
+        "target": {"file": str(simple_workbook)},
+        "steps": [{"id": "s1", "run": "cell.get", "ref": "Revenue!A1", "args": {}}],
+    })
+    wf_path.write_text(content)
+
+    result = runner.invoke(app, ["run", "--workflow", str(wf_path), "--file", str(simple_workbook)])
+    data = _json(result.stdout)
+    assert data["ok"] is False
+    err_msg = data["errors"][0]["message"]
+    # The detailed issues should contain the hint
+    details = data["errors"][0].get("details", {})
+    issues = details.get("issues", [])
+    assert any("step level" in str(i.get("message", "")) for i in issues)
+
+
+# Issue #8: plan create-table header detection
+def test_plan_create_table_detects_headers(simple_workbook: Path):
+    """Issue #8: plan create-table should detect column headers from workbook."""
+    result = runner.invoke(app, [
+        "plan", "create-table",
+        "--file", str(simple_workbook),
+        "--table", "NewTable",
+        "--sheet", "Revenue",
+        "--ref", "A1:D5",
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    plan_result = data["result"]
+    # Should have detected headers
+    assert plan_result.get("detected_headers") is not None
+    assert len(plan_result["detected_headers"]) == 4
+    # Operation should have columns populated
+    op = plan_result["operations"][0]
+    assert op["columns"] is not None
+
+
+def test_plan_create_table_explicit_columns_override(simple_workbook: Path):
+    """Issue #8: explicit --columns should override header detection."""
+    result = runner.invoke(app, [
+        "plan", "create-table",
+        "--file", str(simple_workbook),
+        "--table", "NewTable",
+        "--sheet", "Revenue",
+        "--ref", "A1:D5",
+        "--columns", "X,Y,Z,W",
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    op = data["result"]["operations"][0]
+    assert op["columns"] == ["X", "Y", "Z", "W"]
+    # No detected_headers when explicit columns provided
+    assert data["result"].get("detected_headers") is None
+
+
+# Issue #5: sheet delete and rename
+def test_sheet_delete_success(simple_workbook: Path):
+    """Issue #5: sheet delete should remove a sheet."""
+    result = runner.invoke(app, [
+        "sheet", "delete", "--file", str(simple_workbook), "--name", "Summary",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+    assert data["command"] == "sheet.delete"
+    assert data["result"]["sheet"] == "Summary"
+
+    # Verify sheet is gone
+    ls = runner.invoke(app, ["sheet", "ls", "--file", str(simple_workbook)])
+    names = [s["name"] for s in _json(ls.stdout)["result"]]
+    assert "Summary" not in names
+
+
+def test_sheet_delete_last_sheet_blocked(tmp_path: Path):
+    """Issue #5: cannot delete the last remaining sheet."""
+    wb_path = tmp_path / "single.xlsx"
+    runner.invoke(app, ["wb", "create", "--file", str(wb_path)])
+
+    result = runner.invoke(app, [
+        "sheet", "delete", "--file", str(wb_path), "--name", "Sheet",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 10
+    assert data["ok"] is False
+    assert data["errors"][0]["code"] == "ERR_LAST_SHEET"
+
+
+def test_sheet_delete_not_found(simple_workbook: Path):
+    """Issue #5: deleting nonexistent sheet returns ERR_SHEET_NOT_FOUND."""
+    result = runner.invoke(app, [
+        "sheet", "delete", "--file", str(simple_workbook), "--name", "Nonexistent",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 10
+    assert data["errors"][0]["code"] == "ERR_SHEET_NOT_FOUND"
+
+
+def test_sheet_delete_dry_run(simple_workbook: Path):
+    """Issue #5: sheet delete --dry-run should not persist."""
+    result = runner.invoke(app, [
+        "sheet", "delete", "--file", str(simple_workbook),
+        "--name", "Summary", "--dry-run",
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    assert data["result"]["dry_run"] is True
+
+    ls = runner.invoke(app, ["sheet", "ls", "--file", str(simple_workbook)])
+    names = [s["name"] for s in _json(ls.stdout)["result"]]
+    assert "Summary" in names
+
+
+def test_sheet_rename_success(simple_workbook: Path):
+    """Issue #5: sheet rename should change the sheet name."""
+    result = runner.invoke(app, [
+        "sheet", "rename", "--file", str(simple_workbook),
+        "--name", "Summary", "--new-name", "Overview",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+    assert data["result"]["old_name"] == "Summary"
+    assert data["result"]["new_name"] == "Overview"
+
+    ls = runner.invoke(app, ["sheet", "ls", "--file", str(simple_workbook)])
+    names = [s["name"] for s in _json(ls.stdout)["result"]]
+    assert "Overview" in names
+    assert "Summary" not in names
+
+
+def test_sheet_rename_target_exists(simple_workbook: Path):
+    """Issue #5: renaming to existing name returns ERR_SHEET_EXISTS."""
+    result = runner.invoke(app, [
+        "sheet", "rename", "--file", str(simple_workbook),
+        "--name", "Summary", "--new-name", "Revenue",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 10
+    assert data["errors"][0]["code"] == "ERR_SHEET_EXISTS"
+
+
+def test_sheet_rename_not_found(simple_workbook: Path):
+    """Issue #5: renaming nonexistent sheet returns ERR_SHEET_NOT_FOUND."""
+    result = runner.invoke(app, [
+        "sheet", "rename", "--file", str(simple_workbook),
+        "--name", "Nonexistent", "--new-name", "NewName",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 10
+    assert data["errors"][0]["code"] == "ERR_SHEET_NOT_FOUND"
+
+
+# Issue #6: table delete and column delete
+def test_table_delete_success(simple_workbook: Path):
+    """Issue #6: table delete should remove table definition, preserve data."""
+    import openpyxl
+
+    # Read a cell value before deletion
+    get_before = runner.invoke(app, ["cell", "get", "--file", str(simple_workbook), "--ref", "Revenue!A2"])
+    val_before = _json(get_before.stdout)["result"]["value"]
+
+    result = runner.invoke(app, [
+        "table", "delete", "--file", str(simple_workbook), "--table", "Sales",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+    assert data["command"] == "table.delete"
+
+    # Verify table is gone
+    ls = runner.invoke(app, ["table", "ls", "--file", str(simple_workbook)])
+    tables = [t["name"] for t in _json(ls.stdout)["result"]]
+    assert "Sales" not in tables
+
+    # Verify cell data is preserved
+    get_after = runner.invoke(app, ["cell", "get", "--file", str(simple_workbook), "--ref", "Revenue!A2"])
+    val_after = _json(get_after.stdout)["result"]["value"]
+    assert val_after == val_before
+
+
+def test_table_delete_not_found(simple_workbook: Path):
+    """Issue #6: deleting nonexistent table returns error."""
+    result = runner.invoke(app, [
+        "table", "delete", "--file", str(simple_workbook), "--table", "Nonexistent",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 10
+    assert data["errors"][0]["code"] == "ERR_TABLE_NOT_FOUND"
+
+
+def test_table_delete_dry_run(simple_workbook: Path):
+    """Issue #6: table delete --dry-run should not persist."""
+    result = runner.invoke(app, [
+        "table", "delete", "--file", str(simple_workbook),
+        "--table", "Sales", "--dry-run",
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    assert data["result"]["dry_run"] is True
+
+    ls = runner.invoke(app, ["table", "ls", "--file", str(simple_workbook)])
+    tables = [t["name"] for t in _json(ls.stdout)["result"]]
+    assert "Sales" in tables
+
+
+def test_table_delete_column_success(simple_workbook: Path):
+    """Issue #6: table delete-column should remove the column."""
+    # First add a column so we have something to delete
+    runner.invoke(app, [
+        "table", "add-column", "--file", str(simple_workbook),
+        "--table", "Sales", "--name", "ToDelete", "--default", "0",
+    ])
+
+    result = runner.invoke(app, [
+        "table", "delete-column", "--file", str(simple_workbook),
+        "--table", "Sales", "--name", "ToDelete",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+    assert data["command"] == "table.delete_column"
+
+    # Verify column is gone
+    ls = runner.invoke(app, ["table", "ls", "--file", str(simple_workbook)])
+    tables = _json(ls.stdout)["result"]
+    sales = next(t for t in tables if t["name"] == "Sales")
+    col_names = [c["name"] for c in sales["columns"]]
+    assert "ToDelete" not in col_names
+
+
+def test_table_delete_column_not_found(simple_workbook: Path):
+    """Issue #6: deleting nonexistent column returns error."""
+    result = runner.invoke(app, [
+        "table", "delete-column", "--file", str(simple_workbook),
+        "--table", "Sales", "--name", "Nonexistent",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 10
+    assert data["errors"][0]["code"] == "ERR_COLUMN_NOT_FOUND"
+
+
+def test_table_delete_column_dry_run(simple_workbook: Path):
+    """Issue #6: delete-column --dry-run should not persist."""
+    result = runner.invoke(app, [
+        "table", "delete-column", "--file", str(simple_workbook),
+        "--table", "Sales", "--name", "Region", "--dry-run",
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    assert data["result"]["dry_run"] is True
+
+    ls = runner.invoke(app, ["table", "ls", "--file", str(simple_workbook)])
+    tables = _json(ls.stdout)["result"]
+    sales = next(t for t in tables if t["name"] == "Sales")
+    col_names = [c["name"] for c in sales["columns"]]
+    assert "Region" in col_names
+
+
+# Plan commands for new operations
+def test_plan_delete_sheet(simple_workbook: Path):
+    """Issue #5: plan delete-sheet should generate valid plan."""
+    result = runner.invoke(app, [
+        "plan", "delete-sheet", "--file", str(simple_workbook), "--sheet", "Summary",
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    op = data["result"]["operations"][0]
+    assert op["type"] == "sheet.delete"
+    assert op["sheet"] == "Summary"
+
+
+def test_plan_rename_sheet(simple_workbook: Path):
+    """Issue #5: plan rename-sheet should generate valid plan."""
+    result = runner.invoke(app, [
+        "plan", "rename-sheet", "--file", str(simple_workbook),
+        "--sheet", "Summary", "--new-name", "Overview",
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    op = data["result"]["operations"][0]
+    assert op["type"] == "sheet.rename"
+    assert op["new_name"] == "Overview"
+
+
+def test_plan_delete_table(simple_workbook: Path):
+    """Issue #6: plan delete-table should generate valid plan."""
+    result = runner.invoke(app, [
+        "plan", "delete-table", "--file", str(simple_workbook), "--table", "Sales",
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    op = data["result"]["operations"][0]
+    assert op["type"] == "table.delete"
+    assert op["table"] == "Sales"
+
+
+def test_plan_delete_column(simple_workbook: Path):
+    """Issue #6: plan delete-column should generate valid plan."""
+    result = runner.invoke(app, [
+        "plan", "delete-column", "--file", str(simple_workbook),
+        "--table", "Sales", "--column", "Region",
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    op = data["result"]["operations"][0]
+    assert op["type"] == "table.delete_column"
+    assert op["column"] == "Region"

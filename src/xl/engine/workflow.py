@@ -45,6 +45,10 @@ STEP_ARG_SCHEMA: dict[str, dict[str, list[str]]] = {
     "verify.assert": {"required": ["assertions"], "optional": []},
     "apply": {"required": ["plan"], "optional": []},
     "diff.compare": {"required": ["file_a", "file_b"], "optional": ["sheet"]},
+    "sheet.delete": {"required": ["name"], "optional": []},
+    "sheet.rename": {"required": ["name", "new_name"], "optional": []},
+    "table.delete": {"required": ["table"], "optional": []},
+    "table.delete_column": {"required": ["table", "name"], "optional": []},
 }
 
 
@@ -56,9 +60,11 @@ WORKFLOW_COMMANDS: frozenset[str] = frozenset({
     "formula.find", "formula.lint",
     # Mutation
     "table.create", "table.add_column", "table.append_rows",
+    "table.delete", "table.delete_column",
     "cell.set", "formula.set",
     "format.number", "format.width", "format.freeze",
     "range.clear",
+    "sheet.delete", "sheet.rename",
     # Plan / validation / verification
     "validate.plan", "validate.workbook", "validate.refs",
     "verify.assert",
@@ -151,6 +157,39 @@ def validate_workflow(path: str | Path) -> dict[str, Any]:
         if args is not None and not isinstance(args, dict):
             checks.append({"type": "step_args", "passed": False, "message": f"{prefix}: 'args' must be a mapping"})
 
+        # Validate step args against schema
+        if run_cmd and run_cmd in STEP_ARG_SCHEMA and isinstance(args, dict):
+            schema = STEP_ARG_SCHEMA[run_cmd]
+            required_args = set(schema["required"])
+            provided_args = set(args.keys())
+            all_known = required_args | set(schema["optional"])
+
+            missing_args = required_args - provided_args
+            for arg_name in sorted(missing_args):
+                hint = ""
+                if arg_name in step:
+                    hint = f" (found '{arg_name}' at step level — move it inside 'args:')"
+                checks.append({"type": "step_missing_arg", "passed": False,
+                    "message": f"{prefix}: missing required arg '{arg_name}' for '{run_cmd}'{hint}"})
+
+            unknown_args = provided_args - all_known - {"dry_run", "dry-run"}
+            for arg_name in sorted(unknown_args):
+                checks.append({"type": "step_unknown_arg", "passed": False,
+                    "message": f"{prefix}: unknown arg '{arg_name}' for '{run_cmd}' (valid: {', '.join(sorted(all_known))})"})
+        elif run_cmd and run_cmd in STEP_ARG_SCHEMA and (args is None or not isinstance(args, dict)):
+            schema = STEP_ARG_SCHEMA[run_cmd]
+            required_args = set(schema["required"])
+            if required_args:
+                # Check if required args were placed at step level
+                misplaced = [a for a in sorted(required_args) if a in step]
+                if misplaced:
+                    hint = ", ".join(f"'{a}'" for a in misplaced)
+                    checks.append({"type": "step_missing_arg", "passed": False,
+                        "message": f"{prefix}: found {hint} at step level — wrap them inside 'args:' mapping"})
+                else:
+                    checks.append({"type": "step_missing_arg", "passed": False,
+                        "message": f"{prefix}: no 'args' mapping provided but '{run_cmd}' requires: {', '.join(sorted(required_args))}"})
+
     valid = all(c["passed"] for c in checks)
     return ValidationResult(valid=valid, checks=checks).model_dump()
 
@@ -221,14 +260,19 @@ def load_workflow(path: str | Path) -> WorkflowSpec:
 
         # Check for missing required args
         missing = required - provided
+        raw_steps = data.get("steps", [])
+        raw_step = raw_steps[i] if i < len(raw_steps) and isinstance(raw_steps[i], dict) else {}
         for arg_name in sorted(missing):
+            hint = ""
+            if arg_name in raw_step:
+                hint = f" (found '{arg_name}' at step level — move it inside 'args:')"
             issues.append({
                 "type": "missing_required_arg",
                 "step_index": i,
                 "step_id": step.id,
                 "command": step.run,
                 "arg": arg_name,
-                "message": f"Step '{step.id}' ({step.run}): missing required arg '{arg_name}'",
+                "message": f"Step '{step.id}' ({step.run}): missing required arg '{arg_name}'{hint}",
             })
 
         # Check for unknown args
@@ -253,8 +297,11 @@ def load_workflow(path: str | Path) -> WorkflowSpec:
 
 
 _MUTATING_STEPS = frozenset({
-    "table.create", "table.add_column", "table.append_rows", "cell.set", "formula.set",
+    "table.create", "table.add_column", "table.append_rows",
+    "table.delete", "table.delete_column",
+    "cell.set", "formula.set",
     "format.number", "format.width", "format.freeze", "range.clear",
+    "sheet.delete", "sheet.rename",
     "apply",
 })
 
@@ -264,6 +311,19 @@ def _split_ref(ref: str) -> tuple[str, str]:
     if "!" in ref:
         return ref.split("!", 1)
     return ("", ref)
+
+
+def _resolve_ref(ctx: Any, ref: str, *, include_header: bool = True) -> tuple[str, str]:
+    """Resolve a ref that may be 'Table[Column]' or 'Sheet!Range'.
+
+    Tries ``resolve_table_column_ref`` first; falls back to ``_split_ref``.
+    """
+    from xl.adapters.openpyxl_engine import resolve_table_column_ref
+
+    resolved = resolve_table_column_ref(ctx, ref, include_header=include_header)
+    if resolved is not None:
+        return resolved
+    return _split_ref(ref)
 
 
 def _run_query(ctx: Any, sql: str) -> dict[str, Any]:
@@ -466,7 +526,7 @@ def execute_workflow(
 
             elif step.run == "formula.set":
                 ref = step.args["ref"]
-                sheet_name, cell_ref = _split_ref(ref)
+                sheet_name, cell_ref = _resolve_ref(ctx, ref, include_header=False)
                 change = formula_set(
                     ctx, sheet_name, cell_ref, step.args["formula"],
                     force_overwrite_values=step.args.get("force_overwrite_values", False),
@@ -479,7 +539,7 @@ def execute_workflow(
 
             elif step.run == "format.number":
                 ref = step.args.get("ref", "")
-                sheet_name, range_ref = _split_ref(ref)
+                sheet_name, range_ref = _resolve_ref(ctx, ref)
                 change = format_number(
                     ctx, sheet_name, range_ref,
                     style=step.args.get("style", "number"),
@@ -516,6 +576,35 @@ def execute_workflow(
                     contents=step.args.get("contents", True),
                     formats=step.args.get("formats", False),
                 )
+                mutated = True
+                step_result["result"] = change.model_dump()
+                step_result["ok"] = True
+
+            # -- Sheet / table delete --
+            elif step.run == "sheet.delete":
+                from xl.adapters.openpyxl_engine import sheet_delete
+                change = sheet_delete(ctx, step.args["name"])
+                mutated = True
+                step_result["result"] = change.model_dump()
+                step_result["ok"] = True
+
+            elif step.run == "sheet.rename":
+                from xl.adapters.openpyxl_engine import sheet_rename
+                change = sheet_rename(ctx, step.args["name"], step.args["new_name"])
+                mutated = True
+                step_result["result"] = change.model_dump()
+                step_result["ok"] = True
+
+            elif step.run == "table.delete":
+                from xl.adapters.openpyxl_engine import table_delete
+                change = table_delete(ctx, step.args["table"])
+                mutated = True
+                step_result["result"] = change.model_dump()
+                step_result["ok"] = True
+
+            elif step.run == "table.delete_column":
+                from xl.adapters.openpyxl_engine import table_delete_column
+                change = table_delete_column(ctx, step.args["table"], step.args["name"])
                 mutated = True
                 step_result["result"] = change.model_dump()
                 step_result["ok"] = True

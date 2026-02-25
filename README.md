@@ -167,15 +167,15 @@ xl diff compare --file-a original.xlsx --file-b modified.xlsx
 | Group | Commands | Description |
 |---|---|---|
 | `xl wb` | `inspect`, `lock-status` | Workbook metadata, fingerprint, lock status |
-| `xl sheet` | `ls` | List sheets with dimensions |
-| `xl table` | `create`, `ls`, `add-column`, `append-rows` | Table operations |
+| `xl sheet` | `ls`, `create`, `delete`, `rename` | Sheet lifecycle and management |
+| `xl table` | `create`, `ls`, `add-column`, `append-rows`, `delete`, `delete-column` | Table operations |
 | `xl cell` | `get`, `set` | Read/write individual cells |
 | `xl range` | `stat`, `clear` | Range statistics and clearing |
 | `xl formula` | `set`, `lint`, `find` | Set formulas, lint for issues, search by regex |
 | `xl format` | `number`, `width`, `freeze` | Number formats, column widths, freeze panes |
 | `xl query` | _(top-level)_ | SQL queries over table data via DuckDB |
-| `xl plan` | `show`, `add-column`, `create-table`, `set-cells`, `format`, `compose` | Generate and compose patch plans |
-| `xl validate` | `workbook`, `plan`, `refs` | Validate health, plans, and references |
+| `xl plan` | `show`, `add-column`, `create-table`, `set-cells`, `format`, `compose`, `delete-sheet`, `rename-sheet`, `delete-table`, `delete-column` | Generate and compose patch plans |
+| `xl validate` | `workbook`, `plan`, `refs`, `workflow` | Validate health, plans, references, and workflows |
 | `xl apply` | _(top-level)_ | Apply patch plans with `--dry-run` and `--backup` |
 | `xl verify` | `assert` | Post-apply assertions |
 | `xl diff` | `compare` | Cell-level workbook comparison |

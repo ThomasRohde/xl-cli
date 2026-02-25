@@ -84,6 +84,12 @@ _SHEET_EPILOG = """\
 
 `xl sheet ls -f data.xlsx`  — list all sheets with dimensions and visibility
 
+`xl sheet create -f data.xlsx --name NewSheet`  — add a new sheet
+
+`xl sheet delete -f data.xlsx --name OldSheet --backup`  — remove a sheet (with backup)
+
+`xl sheet rename -f data.xlsx --name Sheet1 --new-name Revenue`  — rename a sheet
+
 Sheet names are required in ref syntax for cell/range commands (e.g. `Sheet1!A1`).
 Use this command to discover valid sheet names before other operations.
 """
@@ -100,6 +106,10 @@ _TABLE_EPILOG = """\
 `xl table add-column -f data.xlsx -t Sales -n Profit --formula "=[@Revenue]-[@Cost]"`
 
 `xl table append-rows -f data.xlsx -t Sales --data '[{"Revenue":100,"Cost":60}]'`
+
+`xl table delete -f data.xlsx -t OldTable --backup`  — remove table definition (preserves cell data)
+
+`xl table delete-column -f data.xlsx -t Sales -n OldCol --backup`  — delete a column from a table
 
 **Table column refs** use structured references: `TableName[ColumnName]` (usable in formula and format commands).
 Prefer table-level operations over raw cell manipulation when data is in Excel tables.
@@ -189,6 +199,14 @@ Generate → compose → validate → apply (with --dry-run first).
 `xl plan compose --plan plan1.json --plan plan2.json`  — merge multiple plans
 
 `xl plan show --plan plan.json`  — inspect a plan
+
+`xl plan delete-sheet -f data.xlsx --sheet OldSheet --out plan.json`  — plan sheet deletion
+
+`xl plan rename-sheet -f data.xlsx --sheet Sheet1 --new-name Revenue --out plan.json`  — plan sheet rename
+
+`xl plan delete-table -f data.xlsx --table OldTable --out plan.json`  — plan table deletion
+
+`xl plan delete-column -f data.xlsx --table Sales --column OldCol --out plan.json`  — plan column deletion
 
 Plans include a **fingerprint** of the target workbook for conflict detection.
 Use `--out` to write raw plan files and `--append plan.json` to incrementally build multi-operation plans.
@@ -471,6 +489,10 @@ def guide(
                 "xl plan create-table": "Generate a plan to create an Excel Table from a range (non-mutating)",
                 "xl plan set-cells": "Generate a plan to set cell values (non-mutating)",
                 "xl plan format": "Generate a plan for number formatting (non-mutating)",
+                "xl plan delete-sheet": "Generate a plan to delete a sheet (non-mutating)",
+                "xl plan rename-sheet": "Generate a plan to rename a sheet (non-mutating)",
+                "xl plan delete-table": "Generate a plan to delete a table definition (non-mutating)",
+                "xl plan delete-column": "Generate a plan to delete a table column (non-mutating)",
                 "xl plan compose": "Merge multiple plan files into one",
                 "xl plan show": "Display a plan's contents",
             },
@@ -485,6 +507,10 @@ def guide(
                 "xl table create": "Create an Excel Table from a cell range (promote range to ListObject)",
                 "xl table add-column": "Add a column to an Excel table",
                 "xl table append-rows": "Append rows to an Excel table",
+                "xl table delete": "Remove a table definition (preserves cell data)",
+                "xl table delete-column": "Delete a column from an Excel table",
+                "xl sheet delete": "Delete a sheet from the workbook",
+                "xl sheet rename": "Rename a sheet",
                 "xl formula set": "Set a formula on a cell, range, or table column",
                 "xl format number": "Apply number format to a range or table column",
                 "xl format width": "Set column widths",
@@ -503,7 +529,7 @@ def guide(
         "workflow_commands": {
             "description": "Step commands supported in 'xl run' YAML workflows (steps[].run values).",
             "inspection": ["wb.inspect", "sheet.ls", "table.ls", "cell.get", "range.stat", "query", "formula.find", "formula.lint"],
-            "mutation": ["table.create", "table.add_column", "table.append_rows", "cell.set", "formula.set", "format.number", "format.width", "format.freeze", "range.clear"],
+            "mutation": ["table.create", "table.add_column", "table.append_rows", "table.delete", "table.delete_column", "sheet.delete", "sheet.rename", "cell.set", "formula.set", "format.number", "format.width", "format.freeze", "range.clear"],
             "validation": ["validate.plan", "validate.workbook", "validate.refs", "verify.assert"],
             "other": ["apply", "diff.compare"],
         },
@@ -814,6 +840,134 @@ def sheet_ls(
 
 
 # ---------------------------------------------------------------------------
+# xl sheet delete
+# ---------------------------------------------------------------------------
+@sheet_app.command("delete")
+def sheet_delete_cmd(
+    file: FilePath,
+    name: Annotated[str, typer.Option("--name", "-n", help="Name of the sheet to delete")],
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    json_out: JsonFlag = True,
+):
+    """Delete a sheet from the workbook. Mutating.
+
+    Removes the named worksheet. Cannot delete the last remaining sheet.
+
+    Example: `xl sheet delete -f data.xlsx --name OldData`
+
+    Example: `xl sheet delete -f data.xlsx --name Temp --backup`
+
+    See also: `xl sheet ls`, `xl sheet create`.
+    """
+    from xl.adapters.openpyxl_engine import sheet_delete
+
+    with Timer() as t:
+        ctx = _load_ctx_or_emit(file, "sheet.delete")
+
+        try:
+            change = sheet_delete(ctx, name)
+        except KeyError:
+            ctx.close()
+            env = error_envelope(
+                "sheet.delete", "ERR_SHEET_NOT_FOUND",
+                f"Sheet '{name}' not found in workbook",
+                target=Target(file=file, sheet=name),
+            )
+            _emit(env)
+            return
+        except ValueError as e:
+            ctx.close()
+            env = error_envelope(
+                "sheet.delete", "ERR_LAST_SHEET",
+                str(e),
+                target=Target(file=file, sheet=name),
+            )
+            _emit(env)
+            return
+
+        backup_path = None
+        if not dry_run:
+            if backup:
+                backup_path = make_backup(file)
+            ctx.save(file)
+        ctx.close()
+
+    result = {"dry_run": dry_run, "backup_path": backup_path, "sheet": name}
+    env = success_envelope(
+        "sheet.delete", result,
+        target=Target(file=file, sheet=name),
+        changes=[change],
+        duration_ms=t.elapsed_ms,
+    )
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl sheet rename
+# ---------------------------------------------------------------------------
+@sheet_app.command("rename")
+def sheet_rename_cmd(
+    file: FilePath,
+    name: Annotated[str, typer.Option("--name", "-n", help="Current name of the sheet to rename")],
+    new_name: Annotated[str, typer.Option("--new-name", help="New name for the sheet")],
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    json_out: JsonFlag = True,
+):
+    """Rename a sheet in the workbook. Mutating.
+
+    Changes the worksheet name. Errors if the old name doesn't exist
+    or the new name is already taken.
+
+    Example: `xl sheet rename -f data.xlsx --name Sheet1 --new-name Revenue`
+
+    See also: `xl sheet ls`.
+    """
+    from xl.adapters.openpyxl_engine import sheet_rename
+
+    with Timer() as t:
+        ctx = _load_ctx_or_emit(file, "sheet.rename")
+
+        try:
+            change = sheet_rename(ctx, name, new_name)
+        except KeyError:
+            ctx.close()
+            env = error_envelope(
+                "sheet.rename", "ERR_SHEET_NOT_FOUND",
+                f"Sheet '{name}' not found",
+                target=Target(file=file, sheet=name),
+            )
+            _emit(env)
+            return
+        except ValueError as e:
+            ctx.close()
+            env = error_envelope(
+                "sheet.rename", "ERR_SHEET_EXISTS",
+                str(e),
+                target=Target(file=file, sheet=name),
+            )
+            _emit(env)
+            return
+
+        backup_path = None
+        if not dry_run:
+            if backup:
+                backup_path = make_backup(file)
+            ctx.save(file)
+        ctx.close()
+
+    result = {"dry_run": dry_run, "backup_path": backup_path, "old_name": name, "new_name": new_name}
+    env = success_envelope(
+        "sheet.rename", result,
+        target=Target(file=file, sheet=name),
+        changes=[change],
+        duration_ms=t.elapsed_ms,
+    )
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
 # xl table ls
 # ---------------------------------------------------------------------------
 @table_app.command("ls")
@@ -1059,6 +1213,117 @@ def table_create_cmd(
         "table.create",
         result,
         target=Target(file=file, sheet=sheet, table=table),
+        changes=[change],
+        duration_ms=t.elapsed_ms,
+    )
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl table delete
+# ---------------------------------------------------------------------------
+@table_app.command("delete")
+def table_delete_cmd(
+    file: FilePath,
+    table: Annotated[str, typer.Option("--table", "-t", help="Name of the table to delete")],
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    json_out: JsonFlag = True,
+):
+    """Delete an Excel Table definition (preserves cell data). Mutating.
+
+    Removes the table structure from the workbook. The underlying
+    cell data is preserved — only the table definition is removed.
+
+    Example: `xl table delete -f data.xlsx -t OldTable`
+
+    Example: `xl table delete -f data.xlsx -t Staging --backup`
+
+    See also: `xl table ls`, `xl table create`.
+    """
+    from xl.adapters.openpyxl_engine import table_delete
+
+    with Timer() as t:
+        ctx = _load_ctx_or_emit(file, "table.delete")
+
+        try:
+            change = table_delete(ctx, table)
+        except ValueError as e:
+            ctx.close()
+            env = error_envelope(
+                "table.delete", "ERR_TABLE_NOT_FOUND",
+                str(e),
+                target=Target(file=file, table=table),
+            )
+            _emit(env)
+            return
+
+        backup_path = None
+        if not dry_run:
+            if backup:
+                backup_path = make_backup(file)
+            ctx.save(file)
+        ctx.close()
+
+    result = {"dry_run": dry_run, "backup_path": backup_path, "table": table}
+    env = success_envelope(
+        "table.delete", result,
+        target=Target(file=file, table=table),
+        changes=[change],
+        duration_ms=t.elapsed_ms,
+    )
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl table delete-column
+# ---------------------------------------------------------------------------
+@table_app.command("delete-column")
+def table_delete_column_cmd(
+    file: FilePath,
+    table: Annotated[str, typer.Option("--table", "-t", help="Table containing the column")],
+    name: Annotated[str, typer.Option("--name", "-n", help="Column name to delete")],
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    json_out: JsonFlag = True,
+):
+    """Delete a column from an Excel Table. Mutating.
+
+    Removes the column and shifts remaining columns left to close the gap.
+
+    Example: `xl table delete-column -f data.xlsx -t Sales -n OldMetric`
+
+    See also: `xl table ls`, `xl table add-column`.
+    """
+    from xl.adapters.openpyxl_engine import table_delete_column
+
+    with Timer() as t:
+        ctx = _load_ctx_or_emit(file, "table.delete_column")
+
+        try:
+            change = table_delete_column(ctx, table, name)
+        except ValueError as e:
+            ctx.close()
+            code = "ERR_COLUMN_NOT_FOUND" if "column" in str(e).lower() else "ERR_TABLE_NOT_FOUND"
+            env = error_envelope(
+                "table.delete_column", code,
+                str(e),
+                target=Target(file=file, table=table),
+            )
+            _emit(env)
+            return
+
+        backup_path = None
+        if not dry_run:
+            if backup:
+                backup_path = make_backup(file)
+            ctx.save(file)
+        ctx.close()
+
+    result = {"dry_run": dry_run, "backup_path": backup_path, "table": table, "column": name}
+    env = success_envelope(
+        "table.delete_column", result,
+        target=Target(file=file, table=table),
         changes=[change],
         duration_ms=t.elapsed_ms,
     )
@@ -1371,6 +1636,26 @@ def plan_create_table(
     from xl.io.fileops import fingerprint
 
     col_list = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
+    detected_headers = None
+
+    # When no explicit columns and workbook exists, detect headers from first row
+    if col_list is None and Path(file).exists():
+        try:
+            from xl.adapters.openpyxl_engine import _parse_ref
+            from xl.engine.context import WorkbookContext as _Ctx
+            det_ctx = _Ctx(file, data_only=True)
+            if sheet in det_ctx.wb.sheetnames:
+                ws = det_ctx.wb[sheet]
+                min_row, min_col, _, max_col = _parse_ref(ref)
+                headers = []
+                for c in range(min_col, max_col + 1):
+                    v = ws.cell(row=min_row, column=c).value
+                    headers.append(str(v) if v is not None else None)
+                if any(h is not None for h in headers):
+                    detected_headers = headers
+            det_ctx.close()
+        except Exception:
+            pass  # Best-effort detection
 
     fp = fingerprint(file) if Path(file).exists() else None
     plan_id = f"pln_{datetime.now(timezone.utc).strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
@@ -1381,7 +1666,7 @@ def plan_create_table(
         table=table,
         sheet=sheet,
         ref=ref,
-        columns=col_list,
+        columns=col_list or detected_headers,
         style=style,
     )
     pre = Precondition(type="sheet_exists", sheet=sheet)
@@ -1424,7 +1709,226 @@ def plan_create_table(
     if out:
         _write_plan(out, plan)
 
-    env = success_envelope("plan.create_table", plan.model_dump(), target=Target(file=file, sheet=sheet, table=table))
+    result_data = plan.model_dump()
+    if detected_headers:
+        result_data["detected_headers"] = detected_headers
+    env = success_envelope("plan.create_table", result_data, target=Target(file=file, sheet=sheet, table=table))
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl plan delete-sheet
+# ---------------------------------------------------------------------------
+@plan_app.command("delete-sheet")
+def plan_delete_sheet(
+    file: FilePath,
+    sheet: Annotated[str, typer.Option("--sheet", "-s", help="Sheet name to delete")],
+    append: Annotated[Optional[str], typer.Option("--append", help="Path to existing plan file to append this operation to")] = None,
+    out: Annotated[Optional[str], typer.Option("--out", "-o", help="Write raw patch plan JSON to this file")] = None,
+    json_out: JsonFlag = True,
+):
+    """Generate a plan to delete a sheet. Non-mutating.
+
+    Example: `xl plan delete-sheet -f data.xlsx -s OldData --out plan.json`
+
+    See also: `xl sheet delete` to apply directly.
+    """
+    from xl.io.fileops import fingerprint
+
+    fp = fingerprint(file) if Path(file).exists() else None
+    plan_id = f"pln_{datetime.now(timezone.utc).strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
+
+    op = Operation(op_id=f"op_{uuid.uuid4().hex[:6]}", type="sheet.delete", sheet=sheet)
+    pre = Precondition(type="sheet_exists", sheet=sheet)
+
+    if append:
+        if Path(append).exists():
+            try:
+                plan = _load_patch_plan(append)
+            except ValueError as e:
+                _emit_invalid_plan("plan.delete_sheet", file, str(e))
+                return
+            if plan.target.file and Path(plan.target.file).resolve() != Path(file).resolve():
+                env = error_envelope("plan.delete_sheet", "ERR_VALIDATION_FAILED",
+                    f"Append plan target file '{plan.target.file}' does not match '{file}'", target=Target(file=file))
+                _emit(env)
+                return
+        else:
+            plan = PatchPlan(plan_id=plan_id, target=PlanTarget(file=file, fingerprint=fp))
+        plan.operations.append(op)
+        plan.preconditions.append(pre)
+        _write_plan(append, plan)
+    else:
+        plan = PatchPlan(plan_id=plan_id, target=PlanTarget(file=file, fingerprint=fp),
+            preconditions=[pre], operations=[op])
+
+    if out:
+        _write_plan(out, plan)
+
+    env = success_envelope("plan.delete_sheet", plan.model_dump(), target=Target(file=file, sheet=sheet))
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl plan rename-sheet
+# ---------------------------------------------------------------------------
+@plan_app.command("rename-sheet")
+def plan_rename_sheet(
+    file: FilePath,
+    sheet: Annotated[str, typer.Option("--sheet", "-s", help="Current sheet name")],
+    new_name: Annotated[str, typer.Option("--new-name", help="New sheet name")],
+    append: Annotated[Optional[str], typer.Option("--append", help="Path to existing plan file to append this operation to")] = None,
+    out: Annotated[Optional[str], typer.Option("--out", "-o", help="Write raw patch plan JSON to this file")] = None,
+    json_out: JsonFlag = True,
+):
+    """Generate a plan to rename a sheet. Non-mutating.
+
+    Example: `xl plan rename-sheet -f data.xlsx -s Sheet1 --new-name Revenue --out plan.json`
+
+    See also: `xl sheet rename` to apply directly.
+    """
+    from xl.io.fileops import fingerprint
+
+    fp = fingerprint(file) if Path(file).exists() else None
+    plan_id = f"pln_{datetime.now(timezone.utc).strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
+
+    op = Operation(op_id=f"op_{uuid.uuid4().hex[:6]}", type="sheet.rename", sheet=sheet, new_name=new_name)
+    pre = Precondition(type="sheet_exists", sheet=sheet)
+    post = Postcondition(type="sheet_exists", sheet=new_name)
+
+    if append:
+        if Path(append).exists():
+            try:
+                plan = _load_patch_plan(append)
+            except ValueError as e:
+                _emit_invalid_plan("plan.rename_sheet", file, str(e))
+                return
+            if plan.target.file and Path(plan.target.file).resolve() != Path(file).resolve():
+                env = error_envelope("plan.rename_sheet", "ERR_VALIDATION_FAILED",
+                    f"Append plan target file '{plan.target.file}' does not match '{file}'", target=Target(file=file))
+                _emit(env)
+                return
+        else:
+            plan = PatchPlan(plan_id=plan_id, target=PlanTarget(file=file, fingerprint=fp))
+        plan.operations.append(op)
+        plan.preconditions.append(pre)
+        plan.postconditions.append(post)
+        _write_plan(append, plan)
+    else:
+        plan = PatchPlan(plan_id=plan_id, target=PlanTarget(file=file, fingerprint=fp),
+            preconditions=[pre], operations=[op], postconditions=[post])
+
+    if out:
+        _write_plan(out, plan)
+
+    env = success_envelope("plan.rename_sheet", plan.model_dump(), target=Target(file=file, sheet=sheet))
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl plan delete-table
+# ---------------------------------------------------------------------------
+@plan_app.command("delete-table")
+def plan_delete_table(
+    file: FilePath,
+    table: Annotated[str, typer.Option("--table", "-t", help="Table name to delete")],
+    append: Annotated[Optional[str], typer.Option("--append", help="Path to existing plan file to append this operation to")] = None,
+    out: Annotated[Optional[str], typer.Option("--out", "-o", help="Write raw patch plan JSON to this file")] = None,
+    json_out: JsonFlag = True,
+):
+    """Generate a plan to delete a table (preserves cell data). Non-mutating.
+
+    Example: `xl plan delete-table -f data.xlsx -t OldTable --out plan.json`
+
+    See also: `xl table delete` to apply directly.
+    """
+    from xl.io.fileops import fingerprint
+
+    fp = fingerprint(file) if Path(file).exists() else None
+    plan_id = f"pln_{datetime.now(timezone.utc).strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
+
+    op = Operation(op_id=f"op_{uuid.uuid4().hex[:6]}", type="table.delete", table=table)
+    pre = Precondition(type="table_exists", table=table)
+
+    if append:
+        if Path(append).exists():
+            try:
+                plan = _load_patch_plan(append)
+            except ValueError as e:
+                _emit_invalid_plan("plan.delete_table", file, str(e))
+                return
+            if plan.target.file and Path(plan.target.file).resolve() != Path(file).resolve():
+                env = error_envelope("plan.delete_table", "ERR_VALIDATION_FAILED",
+                    f"Append plan target file '{plan.target.file}' does not match '{file}'", target=Target(file=file))
+                _emit(env)
+                return
+        else:
+            plan = PatchPlan(plan_id=plan_id, target=PlanTarget(file=file, fingerprint=fp))
+        plan.operations.append(op)
+        plan.preconditions.append(pre)
+        _write_plan(append, plan)
+    else:
+        plan = PatchPlan(plan_id=plan_id, target=PlanTarget(file=file, fingerprint=fp),
+            preconditions=[pre], operations=[op])
+
+    if out:
+        _write_plan(out, plan)
+
+    env = success_envelope("plan.delete_table", plan.model_dump(), target=Target(file=file, table=table))
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl plan delete-column
+# ---------------------------------------------------------------------------
+@plan_app.command("delete-column")
+def plan_delete_column(
+    file: FilePath,
+    table: Annotated[str, typer.Option("--table", "-t", help="Table containing the column")],
+    column: Annotated[str, typer.Option("--column", "-n", help="Column name to delete")],
+    append: Annotated[Optional[str], typer.Option("--append", help="Path to existing plan file to append this operation to")] = None,
+    out: Annotated[Optional[str], typer.Option("--out", "-o", help="Write raw patch plan JSON to this file")] = None,
+    json_out: JsonFlag = True,
+):
+    """Generate a plan to delete a table column. Non-mutating.
+
+    Example: `xl plan delete-column -f data.xlsx -t Sales -n OldMetric --out plan.json`
+
+    See also: `xl table delete-column` to apply directly.
+    """
+    from xl.io.fileops import fingerprint
+
+    fp = fingerprint(file) if Path(file).exists() else None
+    plan_id = f"pln_{datetime.now(timezone.utc).strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
+
+    op = Operation(op_id=f"op_{uuid.uuid4().hex[:6]}", type="table.delete_column", table=table, column=column)
+    pre = Precondition(type="column_exists", table=table, column=column)
+
+    if append:
+        if Path(append).exists():
+            try:
+                plan = _load_patch_plan(append)
+            except ValueError as e:
+                _emit_invalid_plan("plan.delete_column", file, str(e))
+                return
+            if plan.target.file and Path(plan.target.file).resolve() != Path(file).resolve():
+                env = error_envelope("plan.delete_column", "ERR_VALIDATION_FAILED",
+                    f"Append plan target file '{plan.target.file}' does not match '{file}'", target=Target(file=file))
+                _emit(env)
+                return
+        else:
+            plan = PatchPlan(plan_id=plan_id, target=PlanTarget(file=file, fingerprint=fp))
+        plan.operations.append(op)
+        plan.preconditions.append(pre)
+        _write_plan(append, plan)
+    else:
+        plan = PatchPlan(plan_id=plan_id, target=PlanTarget(file=file, fingerprint=fp),
+            preconditions=[pre], operations=[op])
+
+    if out:
+        _write_plan(out, plan)
+
+    env = success_envelope("plan.delete_column", plan.model_dump(), target=Target(file=file, table=table))
     _emit(env)
 
 
@@ -1765,6 +2269,22 @@ def apply_cmd(
                     change = table_create(ctx, op.sheet or "", op.table or "", op.ref or "",
                                           columns=op.columns, style=op.style or "TableStyleMedium2")
                     changes.append(change)
+                elif op.type == "sheet.delete":
+                    from xl.adapters.openpyxl_engine import sheet_delete
+                    change = sheet_delete(ctx, op.sheet or "")
+                    changes.append(change)
+                elif op.type == "sheet.rename":
+                    from xl.adapters.openpyxl_engine import sheet_rename
+                    change = sheet_rename(ctx, op.sheet or "", op.new_name or "")
+                    changes.append(change)
+                elif op.type == "table.delete":
+                    from xl.adapters.openpyxl_engine import table_delete
+                    change = table_delete(ctx, op.table or "")
+                    changes.append(change)
+                elif op.type == "table.delete_column":
+                    from xl.adapters.openpyxl_engine import table_delete_column
+                    change = table_delete_column(ctx, op.table or "", op.column or "")
+                    changes.append(change)
                 else:
                     changes.append(ChangeRecord(
                         op_id=op.op_id,
@@ -1825,6 +2345,7 @@ def query_cmd(
     table: Annotated[Optional[str], typer.Option("--table", "-t", help="Table name for shorthand mode (builds SELECT for you)")] = None,
     where: Annotated[Optional[str], typer.Option("--where", help="WHERE clause for shorthand mode (e.g. \"Revenue > 1000\")")] = None,
     select: Annotated[Optional[str], typer.Option("--select", help="Comma-separated column names for shorthand (default: all)")] = None,
+    data_only: Annotated[bool, typer.Option("--data-only", help="Return last-cached calculated values for formula cells instead of formula text")] = False,
     json_out: JsonFlag = True,
 ):
     """Query table data using SQL via DuckDB.
@@ -1833,9 +2354,15 @@ def query_cmd(
     name. Use `--sql` for full SQL, or `--table` + `--where` + `--select`
     for a shorthand query builder.
 
+    Formula columns return the formula text (e.g. ``=[@Revenue]-[@Cost]``)
+    by default. Use ``--data-only`` to return last-cached calculated values
+    instead (requires the workbook to have been saved by Excel at least once).
+
     Example (full SQL): `xl query -f data.xlsx --sql "SELECT Region, SUM(Sales) FROM Sales GROUP BY Region"`
 
     Example (shorthand): `xl query -f data.xlsx -t Sales --select "Region,Revenue" --where "Revenue > 1000"`
+
+    Example (cached values): `xl query -f data.xlsx -t Sales --data-only`
 
     See also: `xl table ls` to discover available table names.
     """
@@ -1856,7 +2383,7 @@ def query_cmd(
             sql += f" WHERE {where}"
 
     with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "query")
+        ctx = _load_ctx_or_emit(file, "query", data_only=data_only)
 
         try:
             # Extract all tables to DuckDB
@@ -2628,7 +3155,13 @@ def verify_assert_cmd(
         else:
             assertion_list = json.loads(read_text_safe(assertions_file))
     except Exception as e:
-        env = error_envelope("verify.assert", "ERR_VALIDATION_FAILED", f"Cannot parse assertions: {e}", target=Target(file=file))
+        env = error_envelope(
+            "verify.assert", "ERR_VALIDATION_FAILED",
+            f"Cannot parse assertions JSON: {e}. "
+            "Tip: Inline JSON is fragile with shell escaping. "
+            "Prefer --assertions-file <path.json> for reliable input.",
+            target=Target(file=file),
+        )
         _emit(env)
         return
 
@@ -2666,7 +3199,7 @@ def diff_compare_cmd(
     file_a: Annotated[str, typer.Option("--file-a", help="First (original/before) workbook path")],
     file_b: Annotated[str, typer.Option("--file-b", help="Second (modified/after) workbook path")],
     sheet: SheetOpt = None,
-    include_formulas: Annotated[bool, typer.Option("--include-formulas", help="Include formula text changes in addition to value changes")] = False,
+    include_formulas: Annotated[bool, typer.Option("--include-formulas/--no-formulas", help="Include formula text changes in addition to value changes (default: on)")] = True,
     json_out: JsonFlag = True,
 ):
     """Compare two workbook files cell by cell.

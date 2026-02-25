@@ -52,6 +52,7 @@ class Operation(BaseModel):
     force_overwrite_values: bool = False
     force_overwrite_formulas: bool = False
     fill_mode: str | None = None
+    new_name: str | None = None  # for sheet.rename
 
 
 class PlanOptions(BaseModel):

@@ -16,7 +16,7 @@ def diff_workbooks(
     path_b: str | Path,
     sheet_filter: str | None = None,
     *,
-    include_formulas: bool = False,
+    include_formulas: bool = True,
 ) -> dict[str, Any]:
     """Compare two workbook files and return structured diff."""
     wb_a = openpyxl.load_workbook(str(path_a), data_only=True)

@@ -178,6 +178,49 @@ def validate_plan(ctx: WorkbookContext, plan: PatchPlan) -> ValidationResult:
                     "passed": True,
                     "message": f"Operation {op.op_id} is valid",
                 })
+        elif op.type == "sheet.delete":
+            if op.sheet and op.sheet not in ctx.wb.sheetnames:
+                checks.append({"type": "operation_valid", "op_id": op.op_id, "passed": False,
+                    "message": f"Sheet '{op.sheet}' not found (operation {op.op_id})"})
+            elif op.sheet and len(ctx.wb.sheetnames) <= 1:
+                checks.append({"type": "operation_valid", "op_id": op.op_id, "passed": False,
+                    "message": f"Cannot delete last sheet '{op.sheet}' (operation {op.op_id})"})
+            else:
+                checks.append({"type": "operation_valid", "op_id": op.op_id, "passed": True,
+                    "message": f"Operation {op.op_id} is valid"})
+        elif op.type == "sheet.rename":
+            if op.sheet and op.sheet not in ctx.wb.sheetnames:
+                checks.append({"type": "operation_valid", "op_id": op.op_id, "passed": False,
+                    "message": f"Sheet '{op.sheet}' not found (operation {op.op_id})"})
+            elif op.new_name and op.new_name in ctx.wb.sheetnames:
+                checks.append({"type": "operation_valid", "op_id": op.op_id, "passed": False,
+                    "message": f"Sheet '{op.new_name}' already exists (operation {op.op_id})"})
+            else:
+                checks.append({"type": "operation_valid", "op_id": op.op_id, "passed": True,
+                    "message": f"Operation {op.op_id} is valid"})
+        elif op.type == "table.delete":
+            if op.table:
+                found = ctx.find_table(op.table) is not None
+                checks.append({"type": "operation_valid", "op_id": op.op_id, "passed": found,
+                    "message": f"Table '{op.table}' {'exists' if found else 'not found'} (operation {op.op_id})"})
+            else:
+                checks.append({"type": "operation_valid", "op_id": op.op_id, "passed": False,
+                    "message": f"No table specified (operation {op.op_id})"})
+        elif op.type == "table.delete_column":
+            if op.table and op.column:
+                result = ctx.find_table(op.table)
+                if result is None:
+                    checks.append({"type": "operation_valid", "op_id": op.op_id, "passed": False,
+                        "message": f"Table '{op.table}' not found (operation {op.op_id})"})
+                else:
+                    _, tbl = result
+                    col_names = [tc.name for tc in tbl.tableColumns]
+                    found = op.column in col_names
+                    checks.append({"type": "operation_valid", "op_id": op.op_id, "passed": found,
+                        "message": f"Column '{op.column}' {'exists' if found else 'not found'} in table '{op.table}' (operation {op.op_id})"})
+            else:
+                checks.append({"type": "operation_valid", "op_id": op.op_id, "passed": False,
+                    "message": f"Table or column not specified (operation {op.op_id})"})
         else:
             checks.append({
                 "type": "operation_valid",

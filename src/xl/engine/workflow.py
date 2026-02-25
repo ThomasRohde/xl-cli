@@ -12,6 +12,41 @@ from xl.contracts.workflow import WorkflowSpec
 from xl.io.fileops import read_text_safe
 
 
+class WorkflowValidationError(ValueError):
+    """Raised when workflow validation fails with structured details."""
+
+    def __init__(self, message: str, details: list[dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.details = details
+
+
+# Schema defining required/optional args per workflow step command.
+STEP_ARG_SCHEMA: dict[str, dict[str, list[str]]] = {
+    "wb.inspect": {"required": [], "optional": []},
+    "sheet.ls": {"required": [], "optional": []},
+    "table.ls": {"required": [], "optional": ["sheet"]},
+    "cell.get": {"required": ["ref"], "optional": []},
+    "range.stat": {"required": ["ref"], "optional": []},
+    "query": {"required": ["sql"], "optional": []},
+    "formula.find": {"required": ["pattern"], "optional": ["sheet"]},
+    "formula.lint": {"required": [], "optional": ["sheet"]},
+    "table.add_column": {"required": ["table", "name"], "optional": ["formula", "default_value"]},
+    "table.append_rows": {"required": ["table", "rows"], "optional": ["schema_mode"]},
+    "cell.set": {"required": ["ref", "value"], "optional": ["force_overwrite_formulas"]},
+    "formula.set": {"required": ["ref", "formula"], "optional": ["force_overwrite_values", "force_overwrite_formulas", "fill_mode"]},
+    "format.number": {"required": ["ref"], "optional": ["style", "decimals"]},
+    "format.width": {"required": ["sheet", "columns", "width"], "optional": []},
+    "format.freeze": {"required": ["sheet"], "optional": ["ref"]},
+    "range.clear": {"required": ["ref"], "optional": ["contents", "formats"]},
+    "validate.plan": {"required": ["plan"], "optional": []},
+    "validate.workbook": {"required": [], "optional": []},
+    "validate.refs": {"required": ["ref"], "optional": []},
+    "verify.assert": {"required": ["assertions"], "optional": []},
+    "apply": {"required": ["plan"], "optional": []},
+    "diff.compare": {"required": ["file_a", "file_b"], "optional": ["sheet"]},
+}
+
+
 # All supported step commands for ``xl run`` workflows.
 WORKFLOW_COMMANDS: frozenset[str] = frozenset({
     # Inspection / reading
@@ -31,25 +66,189 @@ WORKFLOW_COMMANDS: frozenset[str] = frozenset({
 })
 
 
+def validate_workflow(path: str | Path) -> dict[str, Any]:
+    """Validate a workflow YAML file without requiring a workbook.
+
+    Returns a ValidationResult-style dict: {valid, checks}.
+    """
+    from xl.contracts.responses import ValidationResult
+
+    checks: list[dict[str, Any]] = []
+    p = Path(path)
+
+    # File readable
+    if not p.exists():
+        checks.append({"type": "file_readable", "passed": False, "message": f"File not found: {p}"})
+        return ValidationResult(valid=False, checks=checks).model_dump()
+    checks.append({"type": "file_readable", "passed": True, "message": f"File exists: {p}"})
+
+    # YAML parse
+    try:
+        text = read_text_safe(p)
+        data = yaml.safe_load(text)
+    except Exception as e:
+        checks.append({"type": "yaml_parse", "passed": False, "message": f"YAML parse error: {e}"})
+        return ValidationResult(valid=False, checks=checks).model_dump()
+    checks.append({"type": "yaml_parse", "passed": True, "message": "YAML parsed successfully"})
+
+    # Root is mapping
+    if not isinstance(data, dict):
+        checks.append({"type": "root_mapping", "passed": False, "message": "Root must be a YAML mapping/object"})
+        return ValidationResult(valid=False, checks=checks).model_dump()
+    checks.append({"type": "root_mapping", "passed": True, "message": "Root is a mapping"})
+
+    # Unknown top-level keys
+    allowed_keys = {"schema_version", "name", "target", "defaults", "steps"}
+    unknown_keys = sorted(set(data) - allowed_keys)
+    if unknown_keys:
+        checks.append({"type": "unknown_keys", "passed": False, "message": f"Unknown top-level keys: {', '.join(unknown_keys)}"})
+    else:
+        checks.append({"type": "unknown_keys", "passed": True, "message": "No unknown top-level keys"})
+
+    # Steps is non-empty array
+    steps = data.get("steps")
+    if not isinstance(steps, list):
+        checks.append({"type": "steps_array", "passed": False, "message": "'steps' must be an array"})
+        valid = all(c["passed"] for c in checks)
+        return ValidationResult(valid=valid, checks=checks).model_dump()
+    if not steps:
+        checks.append({"type": "steps_array", "passed": False, "message": "'steps' must contain at least one step"})
+        valid = all(c["passed"] for c in checks)
+        return ValidationResult(valid=valid, checks=checks).model_dump()
+    checks.append({"type": "steps_array", "passed": True, "message": f"{len(steps)} step(s) found"})
+
+    # Per-step validation
+    seen_ids: set[str] = set()
+    for i, step in enumerate(steps):
+        prefix = f"steps[{i}]"
+        if not isinstance(step, dict):
+            checks.append({"type": "step_format", "passed": False, "message": f"{prefix}: must be a mapping"})
+            continue
+
+        # Has id
+        step_id = step.get("id")
+        if not step_id:
+            checks.append({"type": "step_id", "passed": False, "message": f"{prefix}: missing 'id'"})
+        else:
+            if step_id in seen_ids:
+                checks.append({"type": "step_id_unique", "passed": False, "message": f"{prefix}: duplicate id '{step_id}'"})
+            else:
+                checks.append({"type": "step_id", "passed": True, "message": f"{prefix}: id='{step_id}'"})
+            seen_ids.add(step_id)
+
+        # Has run
+        run_cmd = step.get("run")
+        if not run_cmd:
+            checks.append({"type": "step_run", "passed": False, "message": f"{prefix}: missing 'run'"})
+        elif run_cmd not in WORKFLOW_COMMANDS:
+            checks.append({"type": "step_run_valid", "passed": False, "message": f"{prefix}: unknown command '{run_cmd}'"})
+        else:
+            checks.append({"type": "step_run", "passed": True, "message": f"{prefix}: run='{run_cmd}'"})
+
+        # Args is dict (if present)
+        args = step.get("args")
+        if args is not None and not isinstance(args, dict):
+            checks.append({"type": "step_args", "passed": False, "message": f"{prefix}: 'args' must be a mapping"})
+
+    valid = all(c["passed"] for c in checks)
+    return ValidationResult(valid=valid, checks=checks).model_dump()
+
+
 def load_workflow(path: str | Path) -> WorkflowSpec:
-    """Load a workflow spec from a YAML file."""
+    """Load a workflow spec from a YAML file.
+
+    Raises WorkflowValidationError with structured details on invalid input.
+    """
     text = read_text_safe(path)
     data = yaml.safe_load(text)
     if not isinstance(data, dict):
-        raise ValueError("Workflow YAML must be a mapping/object.")
+        raise WorkflowValidationError(
+            "Workflow YAML must be a mapping/object.",
+            [{"type": "yaml_structure", "message": "Root must be a mapping/object, got " + type(data).__name__}],
+        )
 
     allowed_keys = {"schema_version", "name", "target", "defaults", "steps"}
     unknown_keys = sorted(set(data) - allowed_keys)
     if unknown_keys:
-        raise ValueError(f"Unknown workflow keys: {', '.join(unknown_keys)}")
+        raise WorkflowValidationError(
+            f"Unknown workflow keys: {', '.join(unknown_keys)}",
+            [{"type": "unknown_key", "key": k, "message": f"Unknown top-level key: '{k}'"} for k in unknown_keys],
+        )
 
     steps = data.get("steps")
     if not isinstance(steps, list):
-        raise ValueError("Workflow must define 'steps' as an array.")
+        raise WorkflowValidationError(
+            "Workflow must define 'steps' as an array.",
+            [{"type": "missing_steps", "message": "'steps' must be a non-empty array"}],
+        )
     if not steps:
-        raise ValueError("Workflow must contain at least one step.")
+        raise WorkflowValidationError(
+            "Workflow must contain at least one step.",
+            [{"type": "empty_steps", "message": "'steps' array is empty"}],
+        )
 
-    return WorkflowSpec(**data)
+    # Parse with Pydantic — catch validation errors for structured reporting
+    import pydantic
+    try:
+        spec = WorkflowSpec(**data)
+    except pydantic.ValidationError as e:
+        details = []
+        for err in e.errors():
+            loc = " → ".join(str(x) for x in err.get("loc", []))
+            details.append({
+                "type": "pydantic_validation",
+                "location": loc,
+                "message": err.get("msg", str(err)),
+                "input": err.get("input"),
+            })
+        raise WorkflowValidationError(
+            f"Workflow validation failed: {len(details)} error(s)",
+            details,
+        ) from e
+
+    # Validate step args against STEP_ARG_SCHEMA
+    issues: list[dict[str, Any]] = []
+    for i, step in enumerate(spec.steps):
+        schema = STEP_ARG_SCHEMA.get(step.run)
+        if schema is None:
+            continue  # unknown commands already caught by Pydantic validator
+
+        required = set(schema["required"])
+        optional = set(schema["optional"])
+        all_known = required | optional
+        provided = set(step.args.keys())
+
+        # Check for missing required args
+        missing = required - provided
+        for arg_name in sorted(missing):
+            issues.append({
+                "type": "missing_required_arg",
+                "step_index": i,
+                "step_id": step.id,
+                "command": step.run,
+                "arg": arg_name,
+                "message": f"Step '{step.id}' ({step.run}): missing required arg '{arg_name}'",
+            })
+
+        # Check for unknown args
+        unknown = provided - all_known - {"dry_run", "dry-run"}
+        for arg_name in sorted(unknown):
+            issues.append({
+                "type": "unknown_arg",
+                "step_index": i,
+                "step_id": step.id,
+                "command": step.run,
+                "arg": arg_name,
+                "message": f"Step '{step.id}' ({step.run}): unknown arg '{arg_name}' (valid: {', '.join(sorted(all_known))})",
+            })
+
+    if issues:
+        raise WorkflowValidationError(
+            f"Workflow step arg validation failed: {len(issues)} issue(s)",
+            issues,
+        )
+
+    return spec
 
 
 _MUTATING_STEPS = frozenset({
@@ -241,6 +440,7 @@ def execute_workflow(
                     ctx, sheet_name, cell_ref, step.args["formula"],
                     force_overwrite_values=step.args.get("force_overwrite_values", False),
                     force_overwrite_formulas=step.args.get("force_overwrite_formulas", False),
+                    fill_mode=step.args.get("fill_mode", "fixed"),
                 )
                 mutated = True
                 step_result["result"] = change.model_dump()

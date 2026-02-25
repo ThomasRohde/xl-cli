@@ -42,7 +42,10 @@ VALIDATION_CODE_MARKERS = (
     "USAGE",
     "TARGET_MISMATCH",
     "SHEET_NOT_FOUND",
+    "SHEET_EXISTS",
 )
+
+IO_CODE_MARKERS = ("FILE_EXISTS",)
 
 
 def success_envelope(
@@ -85,6 +88,53 @@ def error_envelope(
     )
 
 
+def summarize_changes(changes: list) -> dict:
+    """Build a DryRunSummary dict from a list of ChangeRecord objects."""
+    from xl.contracts.responses import DryRunSummary
+
+    by_type: dict[str, int] = {}
+    by_sheet: dict[str, int] = {}
+    total_cells = 0
+    ops: list[dict] = []
+
+    for change in changes:
+        # Accept both ChangeRecord objects and dicts
+        if hasattr(change, "type"):
+            c_type = change.type
+            c_target = change.target
+            c_impact = change.impact or {}
+        else:
+            c_type = change.get("type", "unknown")
+            c_target = change.get("target", "")
+            c_impact = change.get("impact") or {}
+
+        by_type[c_type] = by_type.get(c_type, 0) + 1
+        cells = c_impact.get("cells", 0) if isinstance(c_impact, dict) else 0
+        total_cells += cells
+
+        # Extract sheet name from target
+        target_str = str(c_target)
+        if "!" in target_str:
+            sheet = target_str.split("!")[0]
+        elif "[" in target_str:
+            sheet = target_str.split("[")[0]
+        else:
+            sheet = target_str
+        if sheet:
+            by_sheet[sheet] = by_sheet.get(sheet, 0) + 1
+
+        ops.append({"type": c_type, "target": target_str, "cells": cells})
+
+    summary = DryRunSummary(
+        total_operations=len(changes),
+        total_cells_affected=total_cells,
+        by_type=by_type,
+        by_sheet=by_sheet,
+        operations=ops,
+    )
+    return summary.model_dump()
+
+
 def output_json(envelope: ResponseEnvelope) -> str:
     """Serialize envelope to JSON string using orjson."""
     data = envelope.model_dump(mode="json")
@@ -113,6 +163,8 @@ def exit_code_for(envelope: ResponseEnvelope) -> int:
         return EXIT_CODES["unsupported"]
     if any(marker in code for marker in VALIDATION_CODE_MARKERS):
         return EXIT_CODES["validation"]
+    if any(marker in code for marker in IO_CODE_MARKERS):
+        return EXIT_CODES["io"]
     if code.startswith("ERR_IO") or "LOCK" in code or code.endswith("NOT_FOUND") or "CORRUPT" in code:
         return EXIT_CODES["io"]
     if "RECALC" in code:

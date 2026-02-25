@@ -270,6 +270,53 @@ def resolve_table_column_ref(
 
 
 # ---------------------------------------------------------------------------
+# formula ref adjustment (for relative fill)
+# ---------------------------------------------------------------------------
+_CELL_REF_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(\$?)([A-Z]{1,3})(\$?)(\d+)(?![A-Za-z0-9_(])"
+)
+
+
+def _adjust_formula_refs(formula: str, row_delta: int, col_delta: int) -> str:
+    """Adjust A1-style references in a formula by row_delta and col_delta.
+
+    - $-prefixed axes are absolute and not adjusted.
+    - Content inside double-quoted string literals is skipped.
+    - Cross-sheet refs like Sheet1!A1 are handled (the Sheet1! prefix is
+      not a letter preceding the column, so the lookbehind passes).
+    """
+    # Split on double quotes to avoid adjusting refs inside string literals.
+    # Odd-indexed segments are inside quotes.
+    parts = formula.split('"')
+    for i in range(0, len(parts), 2):  # process only outside-string segments
+        parts[i] = _CELL_REF_RE.sub(
+            lambda m: _adjust_match(m, row_delta, col_delta),
+            parts[i],
+        )
+    return '"'.join(parts)
+
+
+def _adjust_match(m: re.Match, row_delta: int, col_delta: int) -> str:
+    col_abs, col_letters, row_abs, row_num = m.group(1), m.group(2), m.group(3), m.group(4)
+
+    # Adjust column if not absolute
+    if col_abs != "$" and col_delta != 0:
+        col_idx = column_index_from_string(col_letters) + col_delta
+        if col_idx < 1:
+            col_idx = 1
+        col_letters = get_column_letter(col_idx)
+
+    # Adjust row if not absolute
+    if row_abs != "$" and row_delta != 0:
+        new_row = int(row_num) + row_delta
+        if new_row < 1:
+            new_row = 1
+        row_num = str(new_row)
+
+    return f"{col_abs}{col_letters}{row_abs}{row_num}"
+
+
+# ---------------------------------------------------------------------------
 # formula set
 # ---------------------------------------------------------------------------
 def formula_set(
@@ -280,8 +327,13 @@ def formula_set(
     *,
     force_overwrite_values: bool = False,
     force_overwrite_formulas: bool = False,
+    fill_mode: str = "fixed",
 ) -> ChangeRecord:
-    """Set a formula on a cell or range."""
+    """Set a formula on a cell or range.
+
+    fill_mode: "fixed" copies the formula literally; "relative" adjusts
+    A1-style references relative to the top-left cell of the range.
+    """
     ws = ctx.get_sheet(sheet_name)
     min_row, min_col, max_row, max_col = _parse_ref(ref)
 
@@ -300,7 +352,11 @@ def formula_set(
             if old_val is not None and not (isinstance(old_val, str) and old_val.startswith("=")) and not force_overwrite_values:
                 blocked.append(f"{cell_ref} has value '{old_val}'")
                 continue
-            cell.value = formula
+            if fill_mode == "relative":
+                adjusted = _adjust_formula_refs(formula, row - min_row, col - min_col)
+            else:
+                adjusted = formula
+            cell.value = adjusted
             cells_touched += 1
 
     if blocked and cells_touched == 0:
@@ -356,7 +412,7 @@ def formula_lint(
                     findings.append({
                         "ref": cell_ref,
                         "category": "broken_ref",
-                        "severity": "warning",
+                        "severity": "error",
                         "message": "Contains #REF! error reference",
                         "formula": val,
                     })

@@ -76,6 +76,16 @@ class ApplyResult(BaseModel):
     fingerprint_after: str | None = None
 
 
+class DryRunSummary(BaseModel):
+    """Summary of changes projected during a dry-run."""
+
+    total_operations: int = 0
+    total_cells_affected: int = 0
+    by_type: dict[str, int] = Field(default_factory=dict)
+    by_sheet: dict[str, int] = Field(default_factory=dict)
+    operations: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class QueryResult(BaseModel):
     """Result of a query command."""
 

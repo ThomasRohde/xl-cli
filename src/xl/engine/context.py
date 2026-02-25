@@ -22,6 +22,21 @@ from xl.io.fileops import fingerprint
 class WorkbookContext:
     """Wraps an openpyxl workbook with metadata and helper methods."""
 
+    @classmethod
+    def create(cls, path: str | Path, *, sheets: list[str] | None = None) -> "WorkbookContext":
+        """Create a new workbook file. Raises FileExistsError if path exists."""
+        p = Path(path).resolve()
+        if p.exists():
+            raise FileExistsError(f"File already exists: {p}")
+        wb = Workbook()
+        if sheets:
+            wb.active.title = sheets[0]
+            for name in sheets[1:]:
+                wb.create_sheet(name)
+        wb.save(str(p))
+        wb.close()
+        return cls(p)
+
     def __init__(self, path: str | Path, *, data_only: bool = False) -> None:
         self.path = Path(path).resolve()
         if not self.path.exists():

@@ -651,6 +651,131 @@ def wb_inspect(
 
 
 # ---------------------------------------------------------------------------
+# xl wb create
+# ---------------------------------------------------------------------------
+@wb_app.command("create")
+def wb_create(
+    file: FilePath,
+    sheets: Annotated[Optional[str], typer.Option("--sheets", help="Comma-separated sheet names (e.g. 'Revenue,Summary')")] = None,
+    force: Annotated[bool, typer.Option("--force", help="Overwrite file if it already exists")] = False,
+    json_out: JsonFlag = True,
+):
+    """Create a new empty workbook. Non-mutating (creates a new file).
+
+    Creates a new .xlsx file. Errors if file already exists unless `--force`.
+    Use `--sheets` to specify initial sheet names (default: one sheet named 'Sheet').
+
+    Example: `xl wb create -f new.xlsx`
+
+    Example: `xl wb create -f report.xlsx --sheets Revenue,Summary,Costs`
+
+    See also: `xl sheet create` to add sheets to an existing workbook.
+    """
+    from xl.engine.context import WorkbookContext
+    from xl.io.fileops import fingerprint
+
+    p = Path(file).resolve()
+    sheet_list = [s.strip() for s in sheets.split(",") if s.strip()] if sheets else None
+
+    with Timer() as t:
+        if p.exists() and not force:
+            env = error_envelope(
+                "wb.create", "ERR_FILE_EXISTS",
+                f"File already exists: {p}. Use --force to overwrite.",
+                target=Target(file=file),
+            )
+            _emit(env)
+            return
+
+        if p.exists() and force:
+            p.unlink()
+
+        try:
+            ctx = WorkbookContext.create(p, sheets=sheet_list)
+            meta = ctx.get_workbook_meta()
+            ctx.close()
+        except Exception as e:
+            env = error_envelope("wb.create", "ERR_IO", str(e), target=Target(file=file))
+            _emit(env)
+            return
+
+    result = {
+        "path": str(p),
+        "fingerprint": fingerprint(p),
+        "sheets": [s.name for s in meta.sheets],
+    }
+    env = success_envelope("wb.create", result, target=Target(file=file), duration_ms=t.elapsed_ms)
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
+# xl sheet create
+# ---------------------------------------------------------------------------
+@sheet_app.command("create")
+def sheet_create(
+    file: FilePath,
+    name: Annotated[str, typer.Option("--name", "-n", help="Name for the new sheet")],
+    position: Annotated[Optional[int], typer.Option("--position", help="Zero-based index to insert the sheet at (default: append at end)")] = None,
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    json_out: JsonFlag = True,
+):
+    """Add a new sheet to an existing workbook. Mutating.
+
+    Creates a new worksheet with the given name. Use `--position` to control
+    where the sheet is inserted (0 = first). Errors if a sheet with that
+    name already exists.
+
+    Example: `xl sheet create -f data.xlsx --name Costs`
+
+    Example: `xl sheet create -f data.xlsx --name Summary --position 0 --backup`
+
+    See also: `xl sheet ls` to list existing sheets.
+    """
+    with Timer() as t:
+        ctx = _load_ctx_or_emit(file, "sheet.create")
+
+        if name in ctx.wb.sheetnames:
+            ctx.close()
+            env = error_envelope(
+                "sheet.create", "ERR_SHEET_EXISTS",
+                f"Sheet '{name}' already exists in workbook",
+                target=Target(file=file, sheet=name),
+            )
+            _emit(env)
+            return
+
+        ctx.wb.create_sheet(name, index=position)
+
+        backup_path = None
+        if not dry_run:
+            if backup:
+                from xl.io.fileops import backup as make_backup
+                backup_path = make_backup(file)
+            ctx.save(file)
+        ctx.close()
+
+    result = {
+        "dry_run": dry_run,
+        "backup_path": backup_path,
+        "sheet": name,
+        "position": position,
+    }
+    env = success_envelope(
+        "sheet.create", result,
+        target=Target(file=file, sheet=name),
+        changes=[ChangeRecord(
+            type="sheet.create",
+            target=name,
+            after={"sheet": name, "position": position},
+            impact={"cells": 0},
+        )],
+        duration_ms=t.elapsed_ms,
+    )
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
 # xl sheet ls
 # ---------------------------------------------------------------------------
 @sheet_app.command("ls")
@@ -1483,18 +1608,22 @@ def apply_cmd(
             fp_after = fingerprint(file)
         ctx.close()
 
-    result = ApplyResult(
+    result_data = ApplyResult(
         applied=not dry_run,
         dry_run=dry_run,
         backup_path=backup_path,
         operations_applied=len(changes),
         fingerprint_before=fp_before,
         fingerprint_after=fp_after,
-    )
+    ).model_dump()
+
+    if dry_run and changes:
+        from xl.engine.dispatcher import summarize_changes
+        result_data["dry_run_summary"] = summarize_changes(changes)
 
     env = success_envelope(
         "apply",
-        result.model_dump(),
+        result_data,
         target=Target(file=file),
         changes=changes,
         duration_ms=t.elapsed_ms,
@@ -1785,6 +1914,7 @@ def formula_set_cmd(
     formula: Annotated[str, typer.Option("--formula", help="Excel formula (e.g. '=C2-D2' or '=[@Revenue]-[@Cost]')")],
     force_overwrite_values: Annotated[bool, typer.Option("--force-overwrite-values", help="Allow overwriting cells that contain plain values")] = False,
     force_overwrite_formulas: Annotated[bool, typer.Option("--force-overwrite-formulas", help="Allow overwriting cells that already contain formulas")] = False,
+    fill_mode: Annotated[str, typer.Option("--fill-mode", help="'fixed' copies formula literally; 'relative' adjusts A1-refs per cell (like Excel fill-down)")] = "fixed",
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
     json_out: JsonFlag = True,
@@ -1825,7 +1955,8 @@ def formula_set_cmd(
         try:
             change = formula_set(ctx, sheet_name, cell_ref, formula,
                                  force_overwrite_values=force_overwrite_values,
-                                 force_overwrite_formulas=force_overwrite_formulas)
+                                 force_overwrite_formulas=force_overwrite_formulas,
+                                 fill_mode=fill_mode)
         except (ValueError, KeyError) as e:
             ctx.close()
             env = error_envelope("formula.set", "ERR_FORMULA_BLOCKED", str(e), target=Target(file=file, ref=ref))
@@ -1855,15 +1986,23 @@ def formula_set_cmd(
 def formula_lint_cmd(
     file: FilePath,
     sheet: SheetOpt = None,
+    severity: Annotated[Optional[str], typer.Option("--severity", help="Minimum severity filter: info, warning, or error")] = None,
+    category: Annotated[Optional[str], typer.Option("--category", help="Comma-separated category filter (e.g. 'volatile_function,broken_ref')")] = None,
+    summary: Annotated[bool, typer.Option("--summary", help="Return grouped counts instead of individual findings")] = False,
     json_out: JsonFlag = True,
 ):
     """Lint formulas for common issues — volatile functions, broken refs, anti-patterns.
 
     Scans all formulas (or a single sheet with `--sheet`) and returns findings.
+    Use `--severity` to filter by minimum severity level.
+    Use `--category` to filter to specific categories.
+    Use `--summary` to get aggregated counts instead of individual findings.
 
     Example: `xl formula lint -f data.xlsx`
 
-    Example: `xl formula lint -f data.xlsx --sheet Revenue`
+    Example: `xl formula lint -f data.xlsx --severity error`
+
+    Example: `xl formula lint -f data.xlsx --category volatile_function --summary`
     """
     from xl.adapters.openpyxl_engine import formula_lint
 
@@ -1872,7 +2011,43 @@ def formula_lint_cmd(
         findings = formula_lint(ctx, sheet)
         ctx.close()
 
-    env = success_envelope("formula.lint", {"findings": findings, "count": len(findings)},
+    # Apply severity filter
+    severity_rank = {"info": 0, "warning": 1, "error": 2}
+    if severity:
+        min_rank = severity_rank.get(severity, 0)
+        findings = [f for f in findings if severity_rank.get(f.get("severity", "info"), 0) >= min_rank]
+
+    # Apply category filter
+    if category:
+        cats = {c.strip() for c in category.split(",") if c.strip()}
+        findings = [f for f in findings if f.get("category") in cats]
+
+    # Build summary
+    by_category: dict[str, int] = {}
+    by_severity: dict[str, int] = {}
+    by_sheet: dict[str, int] = {}
+    for f in findings:
+        cat = f.get("category", "unknown")
+        by_category[cat] = by_category.get(cat, 0) + 1
+        sev = f.get("severity", "info")
+        by_severity[sev] = by_severity.get(sev, 0) + 1
+        ref = f.get("ref", "")
+        sname = ref.split("!")[0] if "!" in ref else "unknown"
+        by_sheet[sname] = by_sheet.get(sname, 0) + 1
+
+    summary_data = {
+        "total": len(findings),
+        "by_category": by_category,
+        "by_severity": by_severity,
+        "by_sheet": by_sheet,
+    }
+
+    if summary:
+        result = {"findings": [], "count": len(findings), "summary": summary_data}
+    else:
+        result = {"findings": findings, "count": len(findings), "summary": summary_data}
+
+    env = success_envelope("formula.lint", result,
                            target=Target(file=file, sheet=sheet), duration_ms=t.elapsed_ms)
     _emit(env)
 
@@ -2168,6 +2343,42 @@ def validate_refs_cmd(
 
 
 # ---------------------------------------------------------------------------
+# xl validate workflow
+# ---------------------------------------------------------------------------
+@validate_app.command("workflow")
+def validate_workflow_cmd(
+    workflow_file: Annotated[str, typer.Option("--workflow", "-w", help="Path to YAML workflow file to validate")],
+    json_out: JsonFlag = True,
+):
+    """Validate a workflow YAML file — no workbook required.
+
+    Checks YAML syntax, top-level keys, step IDs, step commands, and
+    structure. Returns pass/fail checks in a ValidationResult.
+
+    Example: `xl validate workflow -w pipeline.yaml`
+
+    See also: `xl run` to execute a workflow.
+    """
+    from xl.engine.workflow import validate_workflow
+
+    with Timer() as t:
+        result = validate_workflow(workflow_file)
+
+    env = success_envelope("validate.workflow", result, duration_ms=t.elapsed_ms)
+    if not result.get("valid", True):
+        env.ok = False
+        failed = [c for c in result.get("checks", []) if not c.get("passed")]
+        env.errors = [
+            ErrorDetail(
+                code="ERR_WORKFLOW_INVALID",
+                message="Workflow validation failed",
+                details={"checks": failed},
+            )
+        ]
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
 # xl wb lock-status
 # ---------------------------------------------------------------------------
 @wb_app.command("lock-status")
@@ -2342,11 +2553,18 @@ def run_cmd(
 
     See also: `xl apply` for single-plan execution.
     """
-    from xl.engine.workflow import execute_workflow, load_workflow
+    from xl.engine.workflow import WorkflowValidationError, execute_workflow, load_workflow
 
     with Timer() as t:
         try:
             workflow = load_workflow(workflow_file)
+        except WorkflowValidationError as e:
+            env = error_envelope(
+                "run", "ERR_WORKFLOW_INVALID", str(e),
+                details={"issues": e.details},
+            )
+            _emit(env)
+            return
         except Exception as e:
             env = error_envelope("run", "ERR_WORKFLOW_INVALID", f"Cannot parse workflow: {e}")
             _emit(env)

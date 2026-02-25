@@ -50,6 +50,7 @@ class Operation(BaseModel):
     cell_type: str | None = None  # number, text, bool, date
     force_overwrite_values: bool = False
     force_overwrite_formulas: bool = False
+    fill_mode: str | None = None
 
 
 class PlanOptions(BaseModel):

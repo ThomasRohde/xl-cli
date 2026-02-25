@@ -66,6 +66,8 @@ All mutating commands include built-in protections:
 
 Requires **Python 3.12+** and [uv](https://docs.astral.sh/uv/).
 
+### Local repo install (development)
+
 ```bash
 # Clone and install
 git clone https://github.com/ThomasRohde/xl-cli.git
@@ -78,6 +80,23 @@ uv run xl --help
 ```
 
 No Excel installation required — works entirely with openpyxl.
+
+### Global install on your PC
+
+Install `xl` as a global user tool so you can run it from any folder:
+
+```bash
+# Clone once, then install globally from this repo
+git clone https://github.com/ThomasRohde/xl-cli.git
+cd xl-cli
+uv tool install --from . xl-agent-cli
+
+# Verify
+xl version
+xl --help
+```
+
+If `xl` is not found right away, open a new terminal so your PATH refreshes.
 
 ---
 

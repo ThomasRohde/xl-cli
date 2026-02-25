@@ -48,6 +48,10 @@ def table_add_column(
         raise ValueError(f"Table not found: {table_name}")
     ws, tbl = result
 
+    existing_names = {tc.name.casefold() for tc in tbl.tableColumns if tc.name}
+    if column_name.casefold() in existing_names:
+        raise ValueError(f"Column '{column_name}' already exists in table '{table_name}'")
+
     ref = tbl.ref
     min_row, min_col, max_row, max_col = _parse_ref(ref)
     new_col_idx = max_col + 1
@@ -207,7 +211,12 @@ def format_number(
     )
 
 
-def resolve_table_column_ref(ctx: WorkbookContext, ref: str) -> tuple[str, str] | None:
+def resolve_table_column_ref(
+    ctx: WorkbookContext,
+    ref: str,
+    *,
+    include_header: bool = True,
+) -> tuple[str, str] | None:
     """Resolve 'TableName[ColumnName]' to (sheet_name, A1_range)."""
     m = re.match(r"(\w+)\[(\w+)\]", ref)
     if not m:
@@ -225,7 +234,10 @@ def resolve_table_column_ref(ctx: WorkbookContext, ref: str) -> tuple[str, str] 
         if tc.name == col_name:
             col_idx = min_col + i
             col_letter = get_column_letter(col_idx)
-            return sheet_name, f"{col_letter}{min_row}:{col_letter}{max_row}"
+            start_row = min_row if include_header else min_row + 1
+            if start_row > max_row:
+                start_row = max_row
+            return sheet_name, f"{col_letter}{start_row}:{col_letter}{max_row}"
     return None
 
 

@@ -30,6 +30,15 @@ def diff_workbooks(
     sheets_common = sorted(sheets_a & sheets_b)
 
     if sheet_filter:
+        missing_in: list[str] = []
+        if sheet_filter not in sheets_a:
+            missing_in.append(f"file_a ({path_a})")
+        if sheet_filter not in sheets_b:
+            missing_in.append(f"file_b ({path_b})")
+        if missing_in:
+            wb_a.close()
+            wb_b.close()
+            raise ValueError(f"Sheet '{sheet_filter}' not found in {', '.join(missing_in)}")
         sheets_common = [s for s in sheets_common if s == sheet_filter]
 
     cell_changes: list[dict[str, Any]] = []

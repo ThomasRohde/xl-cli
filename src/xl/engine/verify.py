@@ -47,7 +47,7 @@ def _check_assertion(ctx: WorkbookContext, assertion: dict[str, Any]) -> dict[st
             "message": f"Column '{column}' {'exists' if found else 'not found'} in table '{table_name}'",
         }
 
-    elif a_type == "table.row_count":
+    elif a_type in ("table.row_count", "row_count.gte", "table.row_count.gte"):
         table_name = assertion["table"]
         result = ctx.find_table(table_name)
         if result is None:
@@ -56,6 +56,24 @@ def _check_assertion(ctx: WorkbookContext, assertion: dict[str, Any]) -> dict[st
         _, tbl = result
         min_row, _, max_row, _ = _parse_ref(tbl.ref)
         actual_count = max_row - min_row  # exclude header
+        if a_type in ("row_count.gte", "table.row_count.gte"):
+            min_rows = assertion.get("min_rows", assertion.get("min"))
+            if min_rows is None:
+                return {
+                    "type": a_type,
+                    "passed": False,
+                    "actual": actual_count,
+                    "message": "row_count.gte requires 'min_rows' (or 'min')",
+                }
+            passed = actual_count >= min_rows
+            return {
+                "type": a_type,
+                "passed": passed,
+                "expected_min": min_rows,
+                "actual": actual_count,
+                "message": f"Table '{table_name}' row count={actual_count}, expected >= {min_rows}",
+            }
+
         expected = assertion.get("expected")
         min_val = assertion.get("min")
         max_val = assertion.get("max")
@@ -81,7 +99,13 @@ def _check_assertion(ctx: WorkbookContext, assertion: dict[str, Any]) -> dict[st
 
     elif a_type == "cell.value_equals":
         ref = assertion["ref"]
-        expected = assertion["expected"]
+        expected = assertion.get("expected", assertion.get("value"))
+        if expected is None:
+            return {
+                "type": a_type,
+                "passed": False,
+                "message": "cell.value_equals requires 'expected' (or legacy alias 'value')",
+            }
         sheet_name, cell_ref = ref.split("!", 1) if "!" in ref else ("", ref)
         from xl.adapters.openpyxl_engine import cell_get
         cell_data = cell_get(ctx, sheet_name, cell_ref)

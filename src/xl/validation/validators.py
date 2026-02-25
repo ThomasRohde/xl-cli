@@ -58,6 +58,7 @@ def _check_precondition(ctx: WorkbookContext, pre: Precondition) -> dict[str, An
 def validate_plan(ctx: WorkbookContext, plan: PatchPlan) -> ValidationResult:
     """Validate a patch plan against the current workbook state."""
     checks: list[dict[str, Any]] = []
+    planned_columns_by_table: dict[str, set[str]] = {}
 
     # Check fingerprint
     if plan.target.fingerprint and plan.options.fail_on_external_change:
@@ -88,8 +89,10 @@ def validate_plan(ctx: WorkbookContext, plan: PatchPlan) -> ValidationResult:
                     })
                 else:
                     _, tbl = result
-                    col_names = [tc.name for tc in tbl.tableColumns]
-                    if op.name in col_names:
+                    col_names = {tc.name.casefold() for tc in tbl.tableColumns if tc.name}
+                    planned = planned_columns_by_table.setdefault(op.table, set())
+                    new_name = (op.name or "").casefold()
+                    if new_name in col_names or new_name in planned:
                         checks.append({
                             "type": "operation_valid",
                             "op_id": op.op_id,
@@ -97,6 +100,7 @@ def validate_plan(ctx: WorkbookContext, plan: PatchPlan) -> ValidationResult:
                             "message": f"Column '{op.name}' already exists in table '{op.table}'",
                         })
                     else:
+                        planned.add(new_name)
                         checks.append({
                             "type": "operation_valid",
                             "op_id": op.op_id,

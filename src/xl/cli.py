@@ -12,11 +12,10 @@ from typing import Annotated, Any, Optional
 import typer
 
 import xl
-from xl.contracts.common import ChangeRecord, Target, WarningDetail
+from xl.contracts.common import ChangeRecord, ErrorDetail, Target, WarningDetail
 from xl.contracts.plans import (
     Operation,
     PatchPlan,
-    PlanOptions,
     PlanTarget,
     Postcondition,
     Precondition,
@@ -40,7 +39,7 @@ Agent-first CLI for reading, transforming, and validating Excel workbooks (.xlsx
 **Recommended workflow:**  inspect → plan → validate → apply → verify
 
 1. `xl wb inspect -f data.xlsx`  — discover sheets, tables, named ranges, fingerprint
-2. `xl plan add-column -f data.xlsx -t Sales -n Margin --formula "=[@Revenue]-[@Cost]"`
+2. `xl plan add-column -f data.xlsx -t Sales -n Margin --formula "=[@Revenue]-[@Cost]" --out plan.json`
 3. `xl validate plan -f data.xlsx --plan plan.json`
 4. `xl apply -f data.xlsx --plan plan.json --dry-run`  — preview changes
 5. `xl apply -f data.xlsx --plan plan.json --backup`   — apply with backup
@@ -170,7 +169,7 @@ Generate → compose → validate → apply (with --dry-run first).
 
 **Examples:**
 
-`xl plan add-column -f data.xlsx -t Sales -n Margin --formula "=[@Revenue]-[@Cost]"` — generate plan JSON
+`xl plan add-column -f data.xlsx -t Sales -n Margin --formula "=[@Revenue]-[@Cost]" --out plan.json` — generate raw plan file
 
 `xl plan set-cells -f data.xlsx --ref "Sheet1!B2" --value 42 --type number`
 
@@ -181,7 +180,7 @@ Generate → compose → validate → apply (with --dry-run first).
 `xl plan show --plan plan.json`  — inspect a plan
 
 Plans include a **fingerprint** of the target workbook for conflict detection.
-Use `--append plan.json` on generators to build multi-operation plans incrementally.
+Use `--out` to write raw plan files and `--append plan.json` to incrementally build multi-operation plans.
 """
 
 _VERIFY_EPILOG = """\
@@ -191,7 +190,7 @@ _VERIFY_EPILOG = """\
 
 `xl verify assert -f data.xlsx --assertions-file assertions.json`
 
-**Assertion types:** `table.column_exists`, `cell.value_equals`, `cell.not_empty`, `row_count.gte`.
+**Assertion types:** `table.column_exists`, `cell.value_equals`, `cell.not_empty`, `table.row_count`, `row_count.gte`.
 Run after `xl apply` to confirm the workbook is in the expected state.
 """
 
@@ -308,6 +307,43 @@ def _emit(envelope, code=None):
     raise typer.Exit(code if code is not None else exit_code_for(envelope))
 
 
+def _load_patch_plan(
+    plan_path: str,
+) -> PatchPlan:
+    """Load and validate a raw PatchPlan JSON file."""
+    try:
+        data = json.loads(Path(plan_path).read_text())
+    except Exception as e:
+        raise ValueError(f"Cannot parse plan: {e}") from e
+
+    if not isinstance(data, dict):
+        raise ValueError("Plan file must contain a JSON object.")
+
+    if {"ok", "command", "result"}.issubset(data):
+        raise ValueError(
+            "Plan file contains a ResponseEnvelope, not a raw patch plan body. "
+            "Use the `result` object or write plans with --out."
+        )
+
+    missing = [k for k in ("target", "operations") if k not in data]
+    if missing:
+        raise ValueError(f"Plan file missing required keys: {', '.join(missing)}")
+
+    try:
+        return PatchPlan(**data)
+    except Exception as e:
+        raise ValueError(f"Cannot parse plan: {e}") from e
+
+
+def _emit_invalid_plan(command: str, file: str, message: str) -> None:
+    env = error_envelope(command, "ERR_PLAN_INVALID", message, target=Target(file=file))
+    _emit(env)
+
+
+def _write_plan(path: str, plan: PatchPlan) -> None:
+    Path(path).write_text(json.dumps(plan.model_dump(mode="json"), indent=2))
+
+
 # ---------------------------------------------------------------------------
 # xl version
 # ---------------------------------------------------------------------------
@@ -349,7 +385,7 @@ def guide(
             "steps": [
                 {"step": 1, "command": "xl wb inspect -f <file>", "purpose": "Discover sheets, tables, named ranges, fingerprint"},
                 {"step": 2, "command": "xl table ls -f <file>", "purpose": "List tables with columns and row counts"},
-                {"step": 3, "command": "xl plan add-column -f <file> -t <table> -n <col> --formula <formula>", "purpose": "Generate a patch plan (non-mutating)"},
+                {"step": 3, "command": "xl plan add-column -f <file> -t <table> -n <col> --formula <formula> --out plan.json", "purpose": "Generate a raw patch plan file"},
                 {"step": 4, "command": "xl validate plan -f <file> --plan plan.json", "purpose": "Validate plan against workbook"},
                 {"step": 5, "command": "xl apply -f <file> --plan plan.json --dry-run", "purpose": "Preview changes without writing"},
                 {"step": 6, "command": "xl apply -f <file> --plan plan.json --backup", "purpose": "Apply changes with backup"},
@@ -436,6 +472,9 @@ def guide(
             "ERR_WORKBOOK_NOT_FOUND": "File does not exist (exit 50)",
             "ERR_TABLE_NOT_FOUND": "Named table not found in workbook (exit 50)",
             "ERR_RANGE_INVALID": "Reference format is invalid or sheet not found (exit 10)",
+            "ERR_PATTERN_INVALID": "Regex pattern is invalid (exit 10)",
+            "ERR_COLUMN_EXISTS": "Column already exists in target table (exit 10)",
+            "ERR_INVALID_ARGUMENT": "Conflicting or malformed arguments provided (exit 10)",
             "ERR_SCHEMA_MISMATCH": "Row data columns don't match table schema (exit 10)",
             "ERR_FORMULA_OVERWRITE_BLOCKED": "Cell contains a formula; use --force-overwrite-formulas (exit 30)",
             "ERR_FORMULA_BLOCKED": "Formula write blocked by safety check (exit 30)",
@@ -445,6 +484,7 @@ def guide(
             "ERR_LOCK_HELD": "File is locked by another process (exit 50)",
             "ERR_MISSING_DATA": "Required data argument not provided (exit 10)",
             "ERR_MISSING_PARAM": "Required parameter not provided (exit 10)",
+            "ERR_ASSERTION_FAILED": "One or more assertions failed (exit 10)",
             "ERR_QUERY_FAILED": "SQL query execution failed (exit 90)",
             "ERR_OPERATION_FAILED": "Plan operation failed during apply (exit 90)",
             "ERR_PROTECTED_RANGE": "Range is protected by policy (exit 20)",
@@ -471,7 +511,7 @@ def guide(
                 "steps": [
                     "xl wb inspect -f budget.xlsx",
                     "xl table ls -f budget.xlsx",
-                    "xl plan add-column -f budget.xlsx -t Sales -n GrossMarginPct --formula \"=[@GrossMargin]/[@Revenue]\"",
+                    "xl plan add-column -f budget.xlsx -t Sales -n GrossMarginPct --formula \"=[@GrossMargin]/[@Revenue]\" --out plan.json",
                     "xl validate plan -f budget.xlsx --plan plan.json",
                     "xl apply -f budget.xlsx --plan plan.json --dry-run",
                     "xl apply -f budget.xlsx --plan plan.json --backup",
@@ -655,7 +695,12 @@ def table_add_column_cmd(
             change = table_add_column(ctx, table, name, formula=formula, default_value=default_value)
         except ValueError as e:
             ctx.close()
-            env = error_envelope("table.add_column", "ERR_TABLE_NOT_FOUND", str(e), target=Target(file=file, table=table))
+            err = str(e).lower()
+            if "already exists" in err:
+                code = "ERR_COLUMN_EXISTS"
+            else:
+                code = "ERR_TABLE_NOT_FOUND"
+            env = error_envelope("table.add_column", code, str(e), target=Target(file=file, table=table))
             _emit(env)
 
         backup_path = None
@@ -872,7 +917,7 @@ def validate_workbook_cmd(
 @validate_app.command("plan")
 def validate_plan_cmd(
     file: FilePath,
-    plan_path: Annotated[str, typer.Option("--plan", help="Path to plan JSON file (generated by 'xl plan' commands)")],
+    plan_path: Annotated[str, typer.Option("--plan", help="Path to raw patch plan JSON file (use --out or --append)")],
     json_out: JsonFlag = True,
 ):
     """Validate a patch plan against a workbook before applying.
@@ -888,11 +933,9 @@ def validate_plan_cmd(
     from xl.validation.validators import validate_plan
 
     try:
-        plan_data = json.loads(Path(plan_path).read_text())
-        plan = PatchPlan(**plan_data)
-    except Exception as e:
-        env = error_envelope("validate.plan", "ERR_PLAN_INVALID", f"Cannot parse plan: {e}", target=Target(file=file))
-        _emit(env)
+        plan = _load_patch_plan(plan_path)
+    except ValueError as e:
+        _emit_invalid_plan("validate.plan", file, str(e))
         return
 
     with Timer() as t:
@@ -911,19 +954,16 @@ def validate_plan_cmd(
         duration_ms=t.elapsed_ms,
     )
     if not result.valid:
+        failed_checks = [c for c in result.checks if not c.get("passed", True)]
         env.ok = False
         env.errors = [
-            _err_from_check(c) for c in result.checks if not c.get("passed", True)
+            ErrorDetail(
+                code="ERR_VALIDATION_FAILED",
+                message="Plan validation failed",
+                details={"checks": failed_checks},
+            )
         ]
     _emit(env)
-
-
-def _err_from_check(check: dict) -> Any:
-    from xl.contracts.common import ErrorDetail
-    return ErrorDetail(
-        code=f"ERR_{check.get('type', 'UNKNOWN').upper()}",
-        message=check.get("message", "Check failed"),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -931,7 +971,7 @@ def _err_from_check(check: dict) -> Any:
 # ---------------------------------------------------------------------------
 @plan_app.command("show")
 def plan_show(
-    plan_path: Annotated[str, typer.Option("--plan", help="Path to plan JSON file (generated by 'xl plan' commands)")],
+    plan_path: Annotated[str, typer.Option("--plan", help="Path to raw patch plan JSON file (use --out or --append)")],
     json_out: JsonFlag = True,
 ):
     """Display the contents of a patch plan — operations, preconditions, target.
@@ -941,10 +981,9 @@ def plan_show(
     See also: `xl validate plan` to check the plan against a workbook.
     """
     try:
-        plan_data = json.loads(Path(plan_path).read_text())
-        plan = PatchPlan(**plan_data)
-    except Exception as e:
-        env = error_envelope("plan.show", "ERR_PLAN_INVALID", f"Cannot parse plan: {e}")
+        plan = _load_patch_plan(plan_path)
+    except ValueError as e:
+        env = error_envelope("plan.show", "ERR_PLAN_INVALID", str(e), target=Target(file=plan_path))
         _emit(env)
         return
 
@@ -963,14 +1002,16 @@ def plan_add_column(
     formula: Annotated[Optional[str], typer.Option("--formula", help="Column formula using structured refs (e.g. '=[@Col1]+[@Col2]')")] = None,
     default_value: Annotated[Optional[str], typer.Option("--default", help="Default static value to fill in all rows")] = None,
     append: Annotated[Optional[str], typer.Option("--append", help="Path to existing plan file to append this operation to")] = None,
+    out: Annotated[Optional[str], typer.Option("--out", "-o", help="Write raw patch plan JSON to this file")] = None,
     json_out: JsonFlag = True,
 ):
     """Generate a plan to add a column to a table. Non-mutating.
 
-    Outputs a patch plan JSON to stdout (does not modify the workbook).
-    Use `--append` to add to an existing plan file for multi-step plans.
+    Outputs a patch plan envelope to stdout.
+    Use `--out` to write a raw patch plan file for `xl validate plan` / `xl apply`.
+    Use `--append` to append to (or create) a raw patch plan file.
 
-    Example: `xl plan add-column -f data.xlsx -t Sales -n Margin --formula "=[@Revenue]-[@Cost]"`
+    Example: `xl plan add-column -f data.xlsx -t Sales -n Margin --formula "=[@Revenue]-[@Cost]" --out plan.json`
 
     See also: `xl table add-column` to apply directly, `xl apply` to execute this plan.
     """
@@ -990,12 +1031,31 @@ def plan_add_column(
     pre = Precondition(type="table_exists", table=table)
     post = Postcondition(type="column_exists", table=table, column=name)
 
-    if append and Path(append).exists():
-        existing = PatchPlan(**json.loads(Path(append).read_text()))
-        existing.operations.append(op)
-        existing.preconditions.append(pre)
-        existing.postconditions.append(post)
-        plan = existing
+    if append:
+        if Path(append).exists():
+            try:
+                plan = _load_patch_plan(append)
+            except ValueError as e:
+                _emit_invalid_plan("plan.add_column", file, str(e))
+                return
+            if plan.target.file and Path(plan.target.file).resolve() != Path(file).resolve():
+                env = error_envelope(
+                    "plan.add_column",
+                    "ERR_VALIDATION_FAILED",
+                    f"Append plan target file '{plan.target.file}' does not match '{file}'",
+                    target=Target(file=file),
+                )
+                _emit(env)
+                return
+        else:
+            plan = PatchPlan(
+                plan_id=plan_id,
+                target=PlanTarget(file=file, fingerprint=fp),
+            )
+        plan.operations.append(op)
+        plan.preconditions.append(pre)
+        plan.postconditions.append(post)
+        _write_plan(append, plan)
     else:
         plan = PatchPlan(
             plan_id=plan_id,
@@ -1004,6 +1064,9 @@ def plan_add_column(
             operations=[op],
             postconditions=[post],
         )
+
+    if out:
+        _write_plan(out, plan)
 
     env = success_envelope("plan.add_column", plan.model_dump(), target=Target(file=file, table=table))
     _emit(env)
@@ -1018,11 +1081,13 @@ def plan_set_cells(
     ref: Annotated[str, typer.Option("--ref", help="Cell reference as SheetName!Cell (e.g. Sheet1!B2)")],
     value: Annotated[str, typer.Option("--value", help="Value to set (coerced according to --type)")],
     cell_type: Annotated[Optional[str], typer.Option("--type", help="Value type: 'number', 'text', or 'bool'")] = None,
+    out: Annotated[Optional[str], typer.Option("--out", "-o", help="Write raw patch plan JSON to this file")] = None,
     json_out: JsonFlag = True,
 ):
     """Generate a plan to set cell values. Non-mutating.
 
-    Outputs a patch plan JSON to stdout (does not modify the workbook).
+    Outputs a patch plan envelope to stdout.
+    Use `--out` to write a raw patch plan file.
 
     Example: `xl plan set-cells -f data.xlsx --ref "Sheet1!B2" --value 42 --type number`
 
@@ -1061,6 +1126,9 @@ def plan_set_cells(
         operations=[op],
     )
 
+    if out:
+        _write_plan(out, plan)
+
     env = success_envelope("plan.set_cells", plan.model_dump(), target=Target(file=file, ref=ref))
     _emit(env)
 
@@ -1075,12 +1143,14 @@ def plan_format(
     style: Annotated[str, typer.Option("--style", help="Format style: number, percent, currency, or date")] = "number",
     decimals: Annotated[int, typer.Option("--decimals", help="Decimal places (default: 2)")] = 2,
     append: Annotated[Optional[str], typer.Option("--append", help="Path to existing plan file to append this operation to")] = None,
+    out: Annotated[Optional[str], typer.Option("--out", "-o", help="Write raw patch plan JSON to this file")] = None,
     json_out: JsonFlag = True,
 ):
     """Generate a plan for number formatting. Non-mutating.
 
-    Outputs a patch plan JSON to stdout (does not modify the workbook).
-    Use `--append` to add to an existing plan file for multi-step plans.
+    Outputs a patch plan envelope to stdout.
+    Use `--out` to write a raw patch plan file.
+    Use `--append` to append to (or create) a raw patch plan file.
 
     Example: `xl plan format -f data.xlsx --ref "Sales[Revenue]" --style currency --decimals 2`
 
@@ -1098,10 +1168,30 @@ def plan_format(
         decimals=decimals,
     )
 
-    if append and Path(append).exists():
-        existing = PatchPlan(**json.loads(Path(append).read_text()))
-        existing.operations.append(op)
-        plan = existing
+    if append:
+        if Path(append).exists():
+            try:
+                plan = _load_patch_plan(append)
+            except ValueError as e:
+                _emit_invalid_plan("plan.format", file, str(e))
+                return
+            if plan.target.file and Path(plan.target.file).resolve() != Path(file).resolve():
+                env = error_envelope(
+                    "plan.format",
+                    "ERR_VALIDATION_FAILED",
+                    f"Append plan target file '{plan.target.file}' does not match '{file}'",
+                    target=Target(file=file),
+                )
+                _emit(env)
+                return
+        else:
+            plan_id = f"pln_{datetime.now(timezone.utc).strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
+            plan = PatchPlan(
+                plan_id=plan_id,
+                target=PlanTarget(file=file, fingerprint=fp),
+            )
+        plan.operations.append(op)
+        _write_plan(append, plan)
     else:
         plan_id = f"pln_{datetime.now(timezone.utc).strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
         plan = PatchPlan(
@@ -1109,6 +1199,9 @@ def plan_format(
             target=PlanTarget(file=file, fingerprint=fp),
             operations=[op],
         )
+
+    if out:
+        _write_plan(out, plan)
 
     env = success_envelope("plan.format", plan.model_dump(), target=Target(file=file, ref=ref))
     _emit(env)
@@ -1120,6 +1213,7 @@ def plan_format(
 @plan_app.command("compose")
 def plan_compose(
     plans: Annotated[list[str], typer.Option("--plan", help="Plan files to merge (repeat --plan for each file)")],
+    out: Annotated[Optional[str], typer.Option("--out", "-o", help="Write raw patch plan JSON to this file")] = None,
     json_out: JsonFlag = True,
 ):
     """Merge multiple plan files into a single composed plan.
@@ -1137,9 +1231,18 @@ def plan_compose(
     target_file = ""
     fp = None
 
+    if not plans:
+        env = error_envelope("plan.compose", "ERR_MISSING_PARAM", "Provide at least one --plan file")
+        _emit(env)
+        return
+
     for p in plans:
-        data = json.loads(Path(p).read_text())
-        plan = PatchPlan(**data)
+        try:
+            plan = _load_patch_plan(p)
+        except ValueError as e:
+            env = error_envelope("plan.compose", "ERR_PLAN_INVALID", str(e), target=Target(file=p))
+            _emit(env)
+            return
         if not target_file:
             target_file = plan.target.file
             fp = plan.target.fingerprint
@@ -1156,6 +1259,9 @@ def plan_compose(
         postconditions=merged_post,
     )
 
+    if out:
+        _write_plan(out, composed)
+
     env = success_envelope("plan.compose", composed.model_dump(), target=Target(file=target_file))
     _emit(env)
 
@@ -1166,7 +1272,7 @@ def plan_compose(
 @app.command("apply")
 def apply_cmd(
     file: FilePath,
-    plan_path: Annotated[str, typer.Option("--plan", help="Path to plan JSON file (generated by 'xl plan' commands)")],
+    plan_path: Annotated[str, typer.Option("--plan", help="Path to raw patch plan JSON file (use --out or --append)")],
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview all changes without writing to disk")] = False,
     do_backup: Annotated[bool, typer.Option("--backup/--no-backup", help="Create timestamped .bak copy before writing (default: on)")] = True,
     json_out: JsonFlag = True,
@@ -1198,11 +1304,9 @@ def apply_cmd(
 
     # Load plan
     try:
-        plan_data = json.loads(Path(plan_path).read_text())
-        plan = PatchPlan(**plan_data)
-    except Exception as e:
-        env = error_envelope("apply", "ERR_PLAN_INVALID", f"Cannot parse plan: {e}", target=Target(file=file))
-        _emit(env)
+        plan = _load_patch_plan(plan_path)
+    except ValueError as e:
+        _emit_invalid_plan("apply", file, str(e))
         return
 
     with Timer() as t:
@@ -1342,6 +1446,9 @@ def query_cmd(
     """
     import duckdb
 
+    conn = None
+    ctx = None
+
     with Timer() as t:
         try:
             ctx = _load_ctx(file, data_only=True)
@@ -1350,67 +1457,65 @@ def query_cmd(
             _emit(env)
             return
 
-        # Build SQL if not provided directly
-        if sql is None:
-            if table is None:
-                ctx.close()
-                env = error_envelope("query", "ERR_MISSING_PARAM", "Provide --sql or --table", target=Target(file=file))
-                _emit(env)
-                return
-            cols = select if select else "*"
-            sql = f"SELECT {cols} FROM {table}"
-            if where:
-                sql += f" WHERE {where}"
-
-        # Extract all tables to DuckDB
-        conn = duckdb.connect()
-        tables_found = ctx.list_tables()
-        for tbl in tables_found:
-            ws = ctx.wb[tbl.sheet]
-            from xl.adapters.openpyxl_engine import _parse_ref
-            min_row, min_col, max_row, max_col = _parse_ref(tbl.ref)
-            col_names = [tc.name for tc in tbl.columns]
-            data_rows = []
-            for row_idx in range(min_row + 1, max_row + 1):
-                row_data = {}
-                for ci, col_name in enumerate(col_names):
-                    cell = ws.cell(row=row_idx, column=min_col + ci)
-                    row_data[col_name] = cell.value
-                data_rows.append(row_data)
-
-            if data_rows:
-                # Build column defs and insert via parameterized VALUES for DuckDB compat
-                col_defs = []
-                for col_name in col_names:
-                    sample = data_rows[0].get(col_name)
-                    if isinstance(sample, int):
-                        col_defs.append(f'"{col_name}" BIGINT')
-                    elif isinstance(sample, float):
-                        col_defs.append(f'"{col_name}" DOUBLE')
-                    else:
-                        col_defs.append(f'"{col_name}" VARCHAR')
-                conn.execute(f'CREATE TABLE "{tbl.name}" ({", ".join(col_defs)})')
-                placeholders = ", ".join(["?"] * len(col_names))
-                insert_sql = f'INSERT INTO "{tbl.name}" VALUES ({placeholders})'
-                for row_data in data_rows:
-                    vals = [row_data.get(c) for c in col_names]
-                    conn.execute(insert_sql, vals)
-
         try:
+            # Build SQL if not provided directly
+            if sql is None:
+                if table is None:
+                    env = error_envelope("query", "ERR_MISSING_PARAM", "Provide --sql or --table", target=Target(file=file))
+                    _emit(env)
+                    return
+                cols = select if select else "*"
+                sql = f"SELECT {cols} FROM {table}"
+                if where:
+                    sql += f" WHERE {where}"
+
+            # Extract all tables to DuckDB
+            conn = duckdb.connect()
+            tables_found = ctx.list_tables()
+            for tbl in tables_found:
+                ws = ctx.wb[tbl.sheet]
+                from xl.adapters.openpyxl_engine import _parse_ref
+                min_row, min_col, max_row, max_col = _parse_ref(tbl.ref)
+                col_names = [tc.name for tc in tbl.columns]
+                data_rows = []
+                for row_idx in range(min_row + 1, max_row + 1):
+                    row_data = {}
+                    for ci, col_name in enumerate(col_names):
+                        cell = ws.cell(row=row_idx, column=min_col + ci)
+                        row_data[col_name] = cell.value
+                    data_rows.append(row_data)
+
+                if data_rows:
+                    # Build column defs and insert via parameterized VALUES for DuckDB compat
+                    col_defs = []
+                    for col_name in col_names:
+                        sample = data_rows[0].get(col_name)
+                        if isinstance(sample, int):
+                            col_defs.append(f'"{col_name}" BIGINT')
+                        elif isinstance(sample, float):
+                            col_defs.append(f'"{col_name}" DOUBLE')
+                        else:
+                            col_defs.append(f'"{col_name}" VARCHAR')
+                    conn.execute(f'CREATE TABLE "{tbl.name}" ({", ".join(col_defs)})')
+                    placeholders = ", ".join(["?"] * len(col_names))
+                    insert_sql = f'INSERT INTO "{tbl.name}" VALUES ({placeholders})'
+                    rows_to_insert = [tuple(row_data.get(c) for c in col_names) for row_data in data_rows]
+                    conn.executemany(insert_sql, rows_to_insert)
+
             cursor = conn.execute(sql)
             columns = [desc[0] for desc in cursor.description]
             raw_rows = cursor.fetchall()
             rows = [dict(zip(columns, row)) for row in raw_rows]
             row_count = len(rows)
         except Exception as e:
-            ctx.close()
-            conn.close()
             env = error_envelope("query", "ERR_QUERY_FAILED", str(e), target=Target(file=file))
             _emit(env)
             return
-
-        conn.close()
-        ctx.close()
+        finally:
+            if conn is not None:
+                conn.close()
+            if ctx is not None:
+                ctx.close()
 
     from xl.contracts.responses import QueryResult
     qr = QueryResult(columns=columns, rows=rows, row_count=row_count)
@@ -1523,7 +1628,7 @@ def range_stat_cmd(
 def range_clear_cmd(
     file: FilePath,
     ref: Annotated[str, typer.Option("--ref", help="Range reference as SheetName!Start:End (e.g. Sheet1!A1:D10)")],
-    contents: Annotated[bool, typer.Option("--contents", help="Clear values and formulas (default: on)")] = True,
+    contents: Annotated[bool, typer.Option("--contents", help="Clear values and formulas")] = False,
     formats: Annotated[bool, typer.Option("--formats", help="Clear number/style formatting")] = False,
     clear_all: Annotated[bool, typer.Option("--all", help="Clear both contents and formatting")] = False,
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
@@ -1547,8 +1652,16 @@ def range_clear_cmd(
         return
 
     sheet_name, range_ref = ref.split("!", 1)
-    do_contents = contents or clear_all
-    do_formats = formats or clear_all
+    if clear_all:
+        do_contents = True
+        do_formats = True
+    elif contents or formats:
+        do_contents = contents
+        do_formats = formats
+    else:
+        # Default behavior remains content-only clear for backward compatibility.
+        do_contents = True
+        do_formats = False
 
     with Timer() as t:
         try:
@@ -1617,7 +1730,7 @@ def formula_set_cmd(
             return
 
         # Resolve ref
-        resolved = resolve_table_column_ref(ctx, ref)
+        resolved = resolve_table_column_ref(ctx, ref, include_header=False)
         if resolved:
             sheet_name, cell_ref = resolved
         elif "!" in ref:
@@ -1708,6 +1821,8 @@ def formula_find_cmd(
 
     Example: `xl formula find -f data.xlsx --pattern "SUM" --sheet Revenue`
     """
+    import re
+
     from xl.adapters.openpyxl_engine import formula_find
 
     with Timer() as t:
@@ -1718,7 +1833,23 @@ def formula_find_cmd(
             _emit(env)
             return
 
-        matches = formula_find(ctx, pattern, sheet)
+        try:
+            matches = formula_find(ctx, pattern, sheet)
+        except re.error as e:
+            ctx.close()
+            env = error_envelope("formula.find", "ERR_PATTERN_INVALID", str(e), target=Target(file=file, sheet=sheet))
+            _emit(env)
+            return
+        except KeyError as e:
+            ctx.close()
+            env = error_envelope("formula.find", "ERR_RANGE_INVALID", str(e), target=Target(file=file, sheet=sheet))
+            _emit(env)
+            return
+        except Exception as e:
+            ctx.close()
+            env = error_envelope("formula.find", "ERR_INTERNAL", str(e), target=Target(file=file, sheet=sheet))
+            _emit(env)
+            return
         ctx.close()
 
     env = success_envelope("formula.find", {"matches": matches, "count": len(matches)},
@@ -1805,9 +1936,37 @@ def format_width_cmd(
 
     Example: `xl format width -f data.xlsx --sheet Sheet1 --columns A,B,C --width 15`
     """
+    import re
+
+    from openpyxl.utils import column_index_from_string
+
     from xl.adapters.openpyxl_engine import format_width
 
-    col_list = [c.strip() for c in columns.split(",")]
+    col_list = [c.strip().upper() for c in columns.split(",") if c.strip()]
+    if not col_list:
+        env = error_envelope("format.width", "ERR_RANGE_INVALID", "Provide at least one column letter", target=Target(file=file, sheet=sheet))
+        _emit(env)
+        return
+
+    invalid_cols: list[str] = []
+    for col in col_list:
+        if not re.fullmatch(r"[A-Z]{1,3}", col):
+            invalid_cols.append(col)
+            continue
+        try:
+            column_index_from_string(col)
+        except ValueError:
+            invalid_cols.append(col)
+
+    if invalid_cols:
+        env = error_envelope(
+            "format.width",
+            "ERR_RANGE_INVALID",
+            f"Invalid column tokens: {', '.join(invalid_cols)}",
+            target=Target(file=file, sheet=sheet),
+        )
+        _emit(env)
+        return
 
     with Timer() as t:
         try:
@@ -1859,6 +2018,11 @@ def format_freeze_cmd(
     """
     from xl.adapters.openpyxl_engine import format_freeze
 
+    if unfreeze and ref:
+        env = error_envelope("format.freeze", "ERR_INVALID_ARGUMENT", "Use either --ref or --unfreeze, not both", target=Target(file=file, sheet=sheet))
+        _emit(env)
+        return
+
     freeze_ref = None if unfreeze else ref
     if not unfreeze and not ref:
         env = error_envelope("format.freeze", "ERR_MISSING_PARAM", "Provide --ref or --unfreeze", target=Target(file=file))
@@ -1907,6 +2071,8 @@ def validate_refs_cmd(
 
     Example: `xl validate refs -f data.xlsx --ref "Sheet1!A1:D10"`
     """
+    from xl.adapters.openpyxl_engine import _parse_ref
+
     with Timer() as t:
         try:
             ctx = _load_ctx(file)
@@ -1920,8 +2086,11 @@ def validate_refs_cmd(
             sheet_name, range_ref = ref.split("!", 1)
             if sheet_name in ctx.wb.sheetnames:
                 checks.append({"type": "sheet_exists", "target": sheet_name, "passed": True, "message": f"Sheet '{sheet_name}' exists"})
-                ws = ctx.wb[sheet_name]
-                checks.append({"type": "range_valid", "target": ref, "passed": True, "message": f"Range '{range_ref}' is valid"})
+                try:
+                    _parse_ref(range_ref)
+                    checks.append({"type": "range_valid", "target": ref, "passed": True, "message": f"Range '{range_ref}' is valid"})
+                except ValueError as e:
+                    checks.append({"type": "range_valid", "target": ref, "passed": False, "message": str(e)})
             else:
                 checks.append({"type": "sheet_exists", "target": sheet_name, "passed": False, "message": f"Sheet '{sheet_name}' not found"})
         else:
@@ -1932,6 +2101,15 @@ def validate_refs_cmd(
     valid = all(c.get("passed", True) for c in checks)
     result = ValidationResult(valid=valid, checks=checks)
     env = success_envelope("validate.refs", result.model_dump(), target=Target(file=file, ref=ref), duration_ms=t.elapsed_ms)
+    if not valid:
+        env.ok = False
+        env.errors = [
+            ErrorDetail(
+                code="ERR_RANGE_INVALID",
+                message="Reference validation failed",
+                details={"checks": checks},
+            )
+        ]
     _emit(env)
 
 
@@ -1973,7 +2151,7 @@ def verify_assert_cmd(
 
     Checks that the workbook matches expected conditions after mutations.
     Returns `ok: false` if any assertion fails. Assertion types include
-    `table.column_exists`, `cell.value_equals`, `cell.not_empty`, `row_count.gte`.
+    `table.column_exists`, `cell.value_equals`, `cell.not_empty`, `table.row_count`, `row_count.gte`.
 
     Example: `xl verify assert -f data.xlsx --assertions '[{"type":"table.column_exists","table":"Sales","column":"Margin"}]'`
 
@@ -1983,12 +2161,28 @@ def verify_assert_cmd(
     """
     from xl.engine.verify import run_assertions
 
-    if assertions:
-        assertion_list = json.loads(assertions)
-    elif assertions_file:
-        assertion_list = json.loads(Path(assertions_file).read_text())
-    else:
+    if assertions and assertions_file:
+        env = error_envelope("verify.assert", "ERR_INVALID_ARGUMENT", "Use either --assertions or --assertions-file", target=Target(file=file))
+        _emit(env)
+        return
+
+    if not assertions and not assertions_file:
         env = error_envelope("verify.assert", "ERR_MISSING_DATA", "Provide --assertions or --assertions-file", target=Target(file=file))
+        _emit(env)
+        return
+
+    try:
+        if assertions:
+            assertion_list = json.loads(assertions)
+        else:
+            assertion_list = json.loads(Path(assertions_file).read_text())
+    except Exception as e:
+        env = error_envelope("verify.assert", "ERR_VALIDATION_FAILED", f"Cannot parse assertions: {e}", target=Target(file=file))
+        _emit(env)
+        return
+
+    if not isinstance(assertion_list, list):
+        env = error_envelope("verify.assert", "ERR_VALIDATION_FAILED", "Assertions payload must be a JSON array", target=Target(file=file))
         _emit(env)
         return
 
@@ -2008,6 +2202,14 @@ def verify_assert_cmd(
     env = success_envelope("verify.assert", result, target=Target(file=file), duration_ms=t.elapsed_ms)
     if not all_passed:
         env.ok = False
+        failed = [r for r in results if not r.get("passed", False)]
+        env.errors = [
+            ErrorDetail(
+                code="ERR_ASSERTION_FAILED",
+                message=f"{len(failed)} assertion(s) failed",
+                details={"failed": failed},
+            )
+        ]
     _emit(env)
 
 
@@ -2039,6 +2241,10 @@ def diff_compare_cmd(
             result = diff_workbooks(file_a, file_b, sheet_filter=sheet)
         except FileNotFoundError as e:
             env = error_envelope("diff.compare", "ERR_WORKBOOK_NOT_FOUND", str(e))
+            _emit(env)
+            return
+        except ValueError as e:
+            env = error_envelope("diff.compare", "ERR_RANGE_INVALID", str(e))
             _emit(env)
             return
 

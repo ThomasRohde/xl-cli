@@ -15,6 +15,20 @@ def load_workflow(path: str | Path) -> WorkflowSpec:
     """Load a workflow spec from a YAML file."""
     text = Path(path).read_text()
     data = yaml.safe_load(text)
+    if not isinstance(data, dict):
+        raise ValueError("Workflow YAML must be a mapping/object.")
+
+    allowed_keys = {"schema_version", "name", "target", "defaults", "steps"}
+    unknown_keys = sorted(set(data) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(f"Unknown workflow keys: {', '.join(unknown_keys)}")
+
+    steps = data.get("steps")
+    if not isinstance(steps, list):
+        raise ValueError("Workflow must define 'steps' as an array.")
+    if not steps:
+        raise ValueError("Workflow must contain at least one step.")
+
     return WorkflowSpec(**data)
 
 
@@ -34,6 +48,7 @@ def execute_workflow(
 
     results: list[dict[str, Any]] = []
     ctx = WorkbookContext(workbook_path)
+    mutated = False
 
     for step in workflow.steps:
         step_result: dict[str, Any] = {"step_id": step.id, "run": step.run}
@@ -51,6 +66,7 @@ def execute_workflow(
                     formula=step.args.get("formula"),
                     default_value=step.args.get("default_value"),
                 )
+                mutated = True
                 step_result["result"] = change.model_dump()
                 step_result["ok"] = True
 
@@ -62,6 +78,7 @@ def execute_workflow(
                     rows,
                     schema_mode=step.args.get("schema_mode", "strict"),
                 )
+                mutated = True
                 step_result["result"] = change.model_dump()
                 step_result["ok"] = True
 
@@ -69,6 +86,7 @@ def execute_workflow(
                 ref = step.args["ref"]
                 sheet_name, cell_ref = ref.split("!", 1) if "!" in ref else ("", ref)
                 change = cell_set(ctx, sheet_name, cell_ref, step.args["value"])
+                mutated = True
                 step_result["result"] = change.model_dump()
                 step_result["ok"] = True
 
@@ -80,6 +98,7 @@ def execute_workflow(
                     force_overwrite_values=step.args.get("force_overwrite_values", False),
                     force_overwrite_formulas=step.args.get("force_overwrite_formulas", False),
                 )
+                mutated = True
                 step_result["result"] = change.model_dump()
                 step_result["ok"] = True
 
@@ -121,7 +140,7 @@ def execute_workflow(
         results.append(step_result)
 
     # Save if not dry_run
-    if not workflow.defaults.dry_run:
+    if not workflow.defaults.dry_run and mutated:
         ctx.save(workbook_path)
 
     ctx.close()

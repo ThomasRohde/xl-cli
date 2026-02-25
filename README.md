@@ -8,7 +8,8 @@ A transactional spreadsheet execution layer that lets AI agents and humans inspe
 xl wb inspect -f budget.xlsx          # discover structure
 xl plan add-column -f budget.xlsx \   # generate a plan (non-mutating)
    -t Sales -n Margin \
-   --formula "=[@Revenue]-[@Cost]"
+   --formula "=[@Revenue]-[@Cost]" \
+   --out plan.json
 xl validate plan -f budget.xlsx \     # check before applying
    --plan plan.json
 xl apply -f budget.xlsx \             # preview changes
@@ -128,7 +129,8 @@ xl query -f data.xlsx \
 ```bash
 # Generate a plan (does NOT modify the workbook)
 xl plan add-column -f data.xlsx -t Sales -n GrossMarginPct \
-  --formula "=[@GrossMargin]/[@Revenue]"
+  --formula "=[@GrossMargin]/[@Revenue]" \
+  --out plan.json
 
 # Validate the plan
 xl validate plan -f data.xlsx --plan plan.json

@@ -102,9 +102,8 @@ class StdioServer:
                         conn.execute(f'CREATE TABLE "{tbl.name}" ({", ".join(col_defs)})')
                         placeholders = ", ".join(["?"] * len(col_names))
                         insert_sql = f'INSERT INTO "{tbl.name}" VALUES ({placeholders})'
-                        for row_data in data_rows:
-                            vals = [row_data.get(c) for c in col_names]
-                            conn.execute(insert_sql, vals)
+                        rows_to_insert = [tuple(row_data.get(c) for c in col_names) for row_data in data_rows]
+                        conn.executemany(insert_sql, rows_to_insert)
                 cursor = conn.execute(sql)
                 columns = [desc[0] for desc in cursor.description]
                 raw_rows = cursor.fetchall()

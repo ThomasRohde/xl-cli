@@ -28,6 +28,19 @@ EXIT_CODES = {
     "internal": 90,
 }
 
+VALIDATION_CODE_MARKERS = (
+    "VALIDATION",
+    "SCHEMA",
+    "RANGE",
+    "PLAN_INVALID",
+    "MISSING_",
+    "ASSERTION",
+    "INVALID_ARGUMENT",
+    "PATTERN_INVALID",
+    "COLUMN_EXISTS",
+    "WORKFLOW_INVALID",
+)
+
 
 def success_envelope(
     command: str,
@@ -86,19 +99,19 @@ def exit_code_for(envelope: ResponseEnvelope) -> int:
         return 0
     if not envelope.errors:
         return EXIT_CODES["internal"]
-    code = envelope.errors[0].code
-    if "VALIDATION" in code or "SCHEMA" in code:
-        return EXIT_CODES["validation"]
+    code = envelope.errors[0].code.upper()
     if "PROTECTED" in code:
         return EXIT_CODES["protection"]
     if "FORMULA" in code:
         return EXIT_CODES["formula"]
     if "FINGERPRINT" in code or "CONFLICT" in code:
         return EXIT_CODES["conflict"]
-    if "IO" in code or "LOCK" in code or "NOT_FOUND" in code:
+    if "UNSUPPORTED" in code:
+        return EXIT_CODES["unsupported"]
+    if any(marker in code for marker in VALIDATION_CODE_MARKERS):
+        return EXIT_CODES["validation"]
+    if code.startswith("ERR_IO") or "LOCK" in code or code.endswith("NOT_FOUND"):
         return EXIT_CODES["io"]
     if "RECALC" in code:
         return EXIT_CODES["recalc"]
-    if "UNSUPPORTED" in code:
-        return EXIT_CODES["unsupported"]
     return EXIT_CODES["internal"]

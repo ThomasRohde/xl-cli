@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any
 
 from openpyxl.utils import column_index_from_string, get_column_letter
@@ -110,12 +111,23 @@ def table_append_rows(
     # Get column names from table
     col_names = [tc.name for tc in tbl.tableColumns]
 
+    # Detect formula columns from first data row
+    formula_cols: set[str] = set()
+    formula_templates: dict[str, str] = {}
+    first_data_row = min_row + 1
+    if first_data_row <= max_row:
+        for col_idx, col_name in enumerate(col_names, start=min_col):
+            cell_val = ws.cell(row=first_data_row, column=col_idx).value
+            if isinstance(cell_val, str) and cell_val.startswith("="):
+                formula_cols.add(col_name)
+                formula_templates[col_name] = cell_val
+
     warnings: list[WarningDetail] = []
 
     for row_data in rows:
         if schema_mode == "strict":
             extra = set(row_data.keys()) - set(col_names)
-            missing = set(col_names) - set(row_data.keys())
+            missing = (set(col_names) - formula_cols) - set(row_data.keys())
             if extra:
                 raise ValueError(f"Extra columns not in table schema: {extra}")
             if missing:
@@ -134,12 +146,18 @@ def table_append_rows(
             # Case-insensitive lookup
             row_lower = {k.casefold(): v for k, v in row_data.items()}
             for col_idx, col_name in enumerate(col_names, start=min_col):
-                val = row_lower.get(col_name.casefold())
-                ws.cell(row=max_row, column=col_idx, value=val)
+                if col_name in formula_cols and col_name.casefold() not in row_lower:
+                    ws.cell(row=max_row, column=col_idx, value=formula_templates[col_name])
+                else:
+                    val = row_lower.get(col_name.casefold())
+                    ws.cell(row=max_row, column=col_idx, value=val)
         else:
             for col_idx, col_name in enumerate(col_names, start=min_col):
-                val = row_data.get(col_name)
-                ws.cell(row=max_row, column=col_idx, value=val)
+                if col_name in formula_cols and col_name not in row_data:
+                    ws.cell(row=max_row, column=col_idx, value=formula_templates[col_name])
+                else:
+                    val = row_data.get(col_name)
+                    ws.cell(row=max_row, column=col_idx, value=val)
 
     # Update table ref
     new_ref = f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
@@ -293,8 +311,18 @@ def cell_set(
         value = float(value)
     elif cell_type == "bool":
         value = bool(value)
+    elif cell_type == "date" and isinstance(value, str):
+        for _fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                value = datetime.strptime(value, _fmt)
+                break
+            except ValueError:
+                continue
 
     cell.value = value
+
+    if cell_type == "date":
+        cell.number_format = "YYYY-MM-DD"
 
     return ChangeRecord(
         type="cell.set",
@@ -584,6 +612,9 @@ def cell_get(
         formula_text = val
     elif isinstance(val, bool):
         val_type = "bool"
+    elif isinstance(val, datetime):
+        val_type = "date"
+        val = val.isoformat()
     elif isinstance(val, (int, float)):
         val_type = "number"
     elif isinstance(val, str):

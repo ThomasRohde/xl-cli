@@ -581,6 +581,113 @@ def test_workflow_invalid_step_rejected_at_parse_time(simple_workbook: Path, tmp
 
 
 # ---------------------------------------------------------------------------
+# REPORT.md v1.3.0 blind-test fixes
+# ---------------------------------------------------------------------------
+
+
+def test_error_output_not_duplicated(simple_workbook: Path):
+    """§4.1 — Error JSON should appear exactly once, not twice."""
+    result = runner.invoke(app, ["wb", "inspect", "--file", "nonexistent_file.xlsx"])
+    # Count occurrences of '"ok"' in combined output
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert combined.count('"ok"') == 1, f"Expected 1 JSON envelope, got {combined.count('\"ok\"')}"
+
+
+def test_cell_set_date_stores_as_date(tmp_path: Path):
+    """§4.4 — cell set --type date should store as Excel serial date, not text."""
+    wb_path = tmp_path / "date_test.xlsx"
+    runner.invoke(app, ["wb", "create", "--file", str(wb_path)])
+
+    result = runner.invoke(app, [
+        "cell", "set", "--file", str(wb_path),
+        "--ref", "Sheet!A1", "--value", "2026-02-25", "--type", "date",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+
+    get_result = runner.invoke(app, ["cell", "get", "--file", str(wb_path), "--ref", "Sheet!A1"])
+    get_data = _json(get_result.stdout)
+    assert get_data["result"]["type"] == "date"
+    assert "2026-02-25" in get_data["result"]["value"]
+    assert "YYYY" in get_data["result"]["number_format"] or "yyyy" in get_data["result"]["number_format"]
+
+
+def test_cell_set_date_with_time(tmp_path: Path):
+    """§4.4 — cell set --type date should accept YYYY-MM-DDTHH:MM:SS."""
+    wb_path = tmp_path / "datetime_test.xlsx"
+    runner.invoke(app, ["wb", "create", "--file", str(wb_path)])
+
+    result = runner.invoke(app, [
+        "cell", "set", "--file", str(wb_path),
+        "--ref", "Sheet!A1", "--value", "2026-02-25T14:30:00", "--type", "date",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+
+    get_result = runner.invoke(app, ["cell", "get", "--file", str(wb_path), "--ref", "Sheet!A1"])
+    get_data = _json(get_result.stdout)
+    assert get_data["result"]["type"] == "date"
+    assert "2026-02-25" in get_data["result"]["value"]
+    assert "14:30:00" in get_data["result"]["value"]
+
+
+def test_table_append_rows_omit_formula_column(formula_table_workbook: Path):
+    """§4.3 — Formula columns should not be required in append-rows."""
+    import openpyxl
+    rows = json.dumps([{"Name": "Diana", "Amount": 400}])
+    result = runner.invoke(app, [
+        "table", "append-rows",
+        "--file", str(formula_table_workbook),
+        "--table", "Payments",
+        "--data", rows,
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+    assert data["changes"][0]["after"]["rows_added"] == 1
+
+    # Verify formula was copied into the new row
+    wb = openpyxl.load_workbook(str(formula_table_workbook))
+    ws = wb["Payments"]
+    tax_cell = ws.cell(row=5, column=3).value  # row 5 = new row (header + 3 data + 1 new)
+    assert isinstance(tax_cell, str) and tax_cell.startswith("=")
+    wb.close()
+
+
+def test_table_append_rows_explicit_null_overrides_formula(formula_table_workbook: Path):
+    """§4.3 — Explicit null for formula column should use that value."""
+    rows = json.dumps([{"Name": "Eve", "Amount": 500, "Tax": None}])
+    result = runner.invoke(app, [
+        "table", "append-rows",
+        "--file", str(formula_table_workbook),
+        "--table", "Payments",
+        "--data", rows,
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+
+
+def test_table_ls_shows_formula_columns(formula_table_workbook: Path):
+    """§4.3 — table ls should indicate which columns are formula columns."""
+    result = runner.invoke(app, [
+        "table", "ls",
+        "--file", str(formula_table_workbook),
+    ])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    table = data["result"][0]
+    tax_col = next(c for c in table["columns"] if c["name"] == "Tax")
+    assert tax_col["is_formula"] is True
+    assert tax_col["formula"] is not None
+
+    name_col = next(c for c in table["columns"] if c["name"] == "Name")
+    assert name_col["is_formula"] is False
+
+
+# ---------------------------------------------------------------------------
 # REPORT.md blind-test regression fixes
 # ---------------------------------------------------------------------------
 

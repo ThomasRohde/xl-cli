@@ -123,9 +123,20 @@ class WorkbookContext:
                     parts = ref.split(":")
                     try:
                         import re
+                        from openpyxl.utils import column_index_from_string
                         start_row = int(re.sub(r"[^0-9]", "", parts[0]))
                         end_row = int(re.sub(r"[^0-9]", "", parts[1]))
                         row_count = max(0, end_row - start_row)  # minus header
+
+                        # Detect formula columns from first data row
+                        first_data_row = start_row + 1
+                        if first_data_row <= end_row:
+                            min_col = column_index_from_string(re.sub(r"[0-9]", "", parts[0]))
+                            for col_meta in cols:
+                                cell_val = ws.cell(row=first_data_row, column=min_col + col_meta.index).value
+                                if isinstance(cell_val, str) and cell_val.startswith("="):
+                                    col_meta.is_formula = True
+                                    col_meta.formula = cell_val
                     except (ValueError, IndexError):
                         pass
 

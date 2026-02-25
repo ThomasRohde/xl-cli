@@ -238,6 +238,7 @@ app = typer.Typer(
     help=_MAIN_HELP,
     no_args_is_help=True,
     rich_markup_mode="markdown",
+    pretty_exceptions_enable=False,
 )
 
 wb_app = typer.Typer(
@@ -1072,7 +1073,7 @@ def cell_set_cmd(
     file: FilePath,
     ref: Annotated[str, typer.Option("--ref", help="Cell reference as SheetName!Cell (e.g. Sheet1!B2)")],
     value: Annotated[str, typer.Option("--value", help="Value to write (coerced according to --type)")],
-    cell_type: Annotated[Optional[str], typer.Option("--type", help="Value type: 'number', 'text', or 'bool'")] = None,
+    cell_type: Annotated[Optional[str], typer.Option("--type", help="Value type: 'number', 'text', 'bool', or 'date'")] = None,
     force_overwrite_formulas: Annotated[bool, typer.Option("--force-overwrite-formulas", help="Allow overwriting a cell that contains a formula")] = False,
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
@@ -1081,10 +1082,14 @@ def cell_set_cmd(
     """Set a cell value. Mutating.
 
     Writes a value to a single cell. The `--type` flag controls coercion:
-    `number` parses as float/int, `bool` parses true/false/1/0, `text` keeps as string.
-    Refuses to overwrite a formula unless `--force-overwrite-formulas` is set.
+    `number` parses as float/int, `bool` parses true/false/1/0, `date` parses
+    ISO 8601 (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS) as an Excel serial date,
+    `text` keeps as string. Refuses to overwrite a formula unless
+    `--force-overwrite-formulas` is set.
 
     Example: `xl cell set -f data.xlsx --ref "Sheet1!B2" --value 42 --type number`
+
+    Example: `xl cell set -f data.xlsx --ref "Sheet1!A1" --value "2026-02-25" --type date`
 
     Example: `xl cell set -f data.xlsx --ref "Sheet1!A1" --value "Hello" --type text --backup`
 
@@ -1111,6 +1116,14 @@ def cell_set_cmd(
             pass
     elif cell_type == "bool":
         parsed_value = value.lower() in ("true", "1", "yes")
+    elif cell_type == "date":
+        from datetime import datetime as _dt
+        for _fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                parsed_value = _dt.strptime(value, _fmt)
+                break
+            except ValueError:
+                continue
 
     with Timer() as t:
         ctx = _load_ctx_or_emit(file, "cell.set")
@@ -1423,7 +1436,7 @@ def plan_set_cells(
     file: FilePath,
     ref: Annotated[str, typer.Option("--ref", help="Cell reference as SheetName!Cell (e.g. Sheet1!B2)")],
     value: Annotated[str, typer.Option("--value", help="Value to set (coerced according to --type)")],
-    cell_type: Annotated[Optional[str], typer.Option("--type", help="Value type: 'number', 'text', or 'bool'")] = None,
+    cell_type: Annotated[Optional[str], typer.Option("--type", help="Value type: 'number', 'text', 'bool', or 'date'")] = None,
     append: Annotated[Optional[str], typer.Option("--append", help="Path to existing plan file to append this operation to")] = None,
     out: Annotated[Optional[str], typer.Option("--out", "-o", help="Write raw patch plan JSON to this file")] = None,
     json_out: JsonFlag = True,

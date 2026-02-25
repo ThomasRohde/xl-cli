@@ -124,6 +124,33 @@ def raw_data_workbook(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
+def formula_table_workbook(tmp_path: Path) -> Path:
+    """Create a workbook with a table that has a formula column."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Payments"
+
+    ws.append(["Name", "Amount", "Tax"])
+    ws.append(["Alice", 100, "=[@Amount]*0.1"])
+    ws.append(["Bob", 200, "=[@Amount]*0.1"])
+    ws.append(["Charlie", 300, "=[@Amount]*0.1"])
+
+    tab = Table(displayName="Payments", ref="A1:C4")
+    tab.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium9",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    ws.add_table(tab)
+
+    path = tmp_path / "formula_table.xlsx"
+    _save_and_reload(wb, path)
+    return path
+
+
+@pytest.fixture()
 def sample_plan(simple_workbook: Path) -> dict:
     """Create a sample patch plan dict."""
     from xl.io.fileops import fingerprint

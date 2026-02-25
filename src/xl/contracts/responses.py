@@ -43,6 +43,8 @@ class TableColumnMeta(BaseModel):
 
     name: str
     index: int
+    is_formula: bool = False
+    formula: str | None = None
 
 
 class TableMeta(BaseModel):

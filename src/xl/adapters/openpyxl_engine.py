@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from openpyxl.utils import column_index_from_string, get_column_letter
-from openpyxl.worksheet.table import Table, TableColumn
+from openpyxl.worksheet.table import Table, TableColumn, TableStyleInfo
 from openpyxl.worksheet.worksheet import Worksheet
 
 from xl.contracts.common import ChangeRecord, WarningDetail
@@ -151,6 +151,112 @@ def table_append_rows(
         after={"rows_added": len(rows)},
         impact={"rows": len(rows), "cells": len(rows) * len(col_names)},
         warnings=warnings,
+    )
+
+
+_TABLE_NAME_RE = re.compile(r"^[A-Za-z_]\w*$")
+
+
+def table_create(
+    ctx: WorkbookContext,
+    sheet_name: str,
+    table_name: str,
+    ref: str,
+    *,
+    columns: list[str] | None = None,
+    style: str = "TableStyleMedium2",
+) -> ChangeRecord:
+    """Create an Excel Table (ListObject) from a cell range."""
+    # Validate table name
+    if not _TABLE_NAME_RE.match(table_name):
+        raise ValueError(
+            f"Invalid table name: '{table_name}'. "
+            "Must start with a letter or underscore and contain only letters, digits, and underscores."
+        )
+
+    # Check uniqueness
+    if ctx.find_table(table_name) is not None:
+        raise ValueError(f"Table '{table_name}' already exists")
+
+    # Get worksheet
+    ws = ctx.get_sheet(sheet_name)
+
+    # Parse ref
+    min_row, min_col, max_row, max_col = _parse_ref(ref)
+
+    # Check overlap with existing tables
+    for existing_tbl in ws._tables.values():
+        t_min_row, t_min_col, t_max_row, t_max_col = _parse_ref(existing_tbl.ref)
+        if not (max_row < t_min_row or min_row > t_max_row or
+                max_col < t_min_col or min_col > t_max_col):
+            raise ValueError(
+                f"Range {ref} overlaps existing table '{existing_tbl.displayName}' at {existing_tbl.ref}"
+            )
+
+    # Determine column names
+    header_row_empty = all(
+        ws.cell(row=min_row, column=c).value is None
+        for c in range(min_col, max_col + 1)
+    )
+
+    if columns and header_row_empty:
+        # Write column headers
+        for i, col_name in enumerate(columns, start=min_col):
+            ws.cell(row=min_row, column=i, value=col_name)
+        actual_col_names = list(columns)
+    elif columns and not header_row_empty:
+        # Verify headers match
+        existing_headers = [
+            ws.cell(row=min_row, column=c).value
+            for c in range(min_col, max_col + 1)
+        ]
+        if existing_headers != columns:
+            raise ValueError(
+                f"Header row values {existing_headers} do not match provided columns {columns}"
+            )
+        actual_col_names = list(columns)
+    else:
+        # Read existing headers
+        actual_col_names = []
+        for c in range(min_col, max_col + 1):
+            v = ws.cell(row=min_row, column=c).value
+            if v is None:
+                raise ValueError(
+                    f"Header row has empty cell at column {get_column_letter(c)}; "
+                    "provide --columns to fill them"
+                )
+            actual_col_names.append(str(v))
+
+    # Create Table object
+    style_info = TableStyleInfo(
+        name=style,
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    tbl = Table(displayName=table_name, ref=ref)
+    tbl.tableStyleInfo = style_info
+    for i, col_name in enumerate(actual_col_names):
+        tbl.tableColumns.append(TableColumn(id=i + 1, name=col_name))
+
+    ws.add_table(tbl)
+
+    data_rows = max_row - min_row  # rows excluding header
+    return ChangeRecord(
+        type="table.create",
+        target=f"{sheet_name}!{table_name}",
+        after={
+            "table": table_name,
+            "sheet": sheet_name,
+            "ref": ref,
+            "columns": actual_col_names,
+            "style": style,
+        },
+        impact={
+            "rows": data_rows,
+            "cells": data_rows * (max_col - min_col + 1),
+        },
     )
 
 
@@ -327,7 +433,7 @@ def formula_set(
     *,
     force_overwrite_values: bool = False,
     force_overwrite_formulas: bool = False,
-    fill_mode: str = "fixed",
+    fill_mode: str = "relative",
 ) -> ChangeRecord:
     """Set a formula on a cell or range.
 

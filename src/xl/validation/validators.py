@@ -132,6 +132,52 @@ def validate_plan(ctx: WorkbookContext, plan: PatchPlan) -> ValidationResult:
                         "passed": True,
                         "message": f"Operation {op.op_id} is valid",
                     })
+        elif op.type == "table.create":
+            if op.sheet and op.sheet not in ctx.wb.sheetnames:
+                checks.append({
+                    "type": "operation_valid",
+                    "op_id": op.op_id,
+                    "passed": False,
+                    "message": f"Sheet '{op.sheet}' not found for operation {op.op_id}",
+                })
+            elif op.table and ctx.find_table(op.table) is not None:
+                checks.append({
+                    "type": "operation_valid",
+                    "op_id": op.op_id,
+                    "passed": False,
+                    "message": f"Table '{op.table}' already exists (operation {op.op_id})",
+                })
+            elif op.ref and op.sheet:
+                from xl.adapters.openpyxl_engine import _parse_ref
+                ws = ctx.wb[op.sheet]
+                min_row, min_col, max_row, max_col = _parse_ref(op.ref)
+                overlap_found = False
+                for tbl in ws._tables.values():
+                    t_min_row, t_min_col, t_max_row, t_max_col = _parse_ref(tbl.ref)
+                    if not (max_row < t_min_row or min_row > t_max_row or
+                            max_col < t_min_col or min_col > t_max_col):
+                        overlap_found = True
+                        checks.append({
+                            "type": "operation_valid",
+                            "op_id": op.op_id,
+                            "passed": False,
+                            "message": f"Range {op.ref} overlaps table '{tbl.displayName}' at {tbl.ref}",
+                        })
+                        break
+                if not overlap_found:
+                    checks.append({
+                        "type": "operation_valid",
+                        "op_id": op.op_id,
+                        "passed": True,
+                        "message": f"Operation {op.op_id} is valid",
+                    })
+            else:
+                checks.append({
+                    "type": "operation_valid",
+                    "op_id": op.op_id,
+                    "passed": True,
+                    "message": f"Operation {op.op_id} is valid",
+                })
         else:
             checks.append({
                 "type": "operation_valid",

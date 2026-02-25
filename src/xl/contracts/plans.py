@@ -44,6 +44,7 @@ class Operation(BaseModel):
     decimals: int | None = None
     values: list[Any] | None = None
     column: str | None = None
+    columns: list[str] | None = None  # column headers for table.create
     position: str | None = None  # append (default)
     rows: list[dict[str, Any]] | None = None
     schema_mode: str | None = None  # strict, allow-missing-null, map-by-header

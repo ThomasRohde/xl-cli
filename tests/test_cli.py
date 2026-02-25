@@ -144,6 +144,110 @@ def test_table_append_rows(simple_workbook: Path):
     assert data["changes"][0]["after"]["rows_added"] == 1
 
 
+def test_table_create_cli(raw_data_workbook: Path):
+    result = runner.invoke(app, [
+        "table", "create",
+        "--file", str(raw_data_workbook),
+        "--table", "Items",
+        "--sheet", "Data",
+        "--ref", "A1:C4",
+    ])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["ok"] is True
+    assert data["command"] == "table.create"
+    assert len(data["changes"]) == 1
+    assert data["changes"][0]["type"] == "table.create"
+
+
+def test_table_create_dry_run(raw_data_workbook: Path):
+    result = runner.invoke(app, [
+        "table", "create",
+        "--file", str(raw_data_workbook),
+        "--table", "T1",
+        "--sheet", "Data",
+        "--ref", "A1:C4",
+        "--dry-run",
+    ])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["ok"] is True
+    assert data["result"]["dry_run"] is True
+
+    # Verify table was NOT actually created
+    import openpyxl
+    wb2 = openpyxl.load_workbook(str(raw_data_workbook))
+    ws2 = wb2.active
+    assert len(list(ws2._tables.values())) == 0
+    wb2.close()
+
+
+def test_table_create_with_columns_cli(tmp_path: Path):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    path = tmp_path / "cols.xlsx"
+    wb.save(str(path))
+    wb.close()
+
+    result = runner.invoke(app, [
+        "table", "create",
+        "--file", str(path),
+        "--table", "MyTable",
+        "--sheet", "Sheet1",
+        "--ref", "A1:C1",
+        "--columns", "Name,Value,Date",
+    ])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["ok"] is True
+    assert data["changes"][0]["after"]["columns"] == ["Name", "Value", "Date"]
+
+
+def test_table_create_duplicate_name_cli(simple_workbook: Path):
+    result = runner.invoke(app, [
+        "table", "create",
+        "--file", str(simple_workbook),
+        "--table", "Sales",
+        "--sheet", "Revenue",
+        "--ref", "F1:H3",
+        "--columns", "X,Y,Z",
+    ])
+    data = json.loads(result.stdout)
+    assert data["ok"] is False
+    assert data["errors"][0]["code"] == "ERR_TABLE_EXISTS"
+
+
+def test_plan_create_table(tmp_path: Path):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    path = tmp_path / "plan_test.xlsx"
+    wb.save(str(path))
+    wb.close()
+
+    result = runner.invoke(app, [
+        "plan", "create-table",
+        "--file", str(path),
+        "--table", "Sales",
+        "--sheet", "Data",
+        "--ref", "A1:D5",
+        "--columns", "Region,Product,Revenue,Cost",
+    ])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert data["ok"] is True
+    plan = data["result"]
+    assert plan["operations"][0]["type"] == "table.create"
+    assert plan["operations"][0]["columns"] == ["Region", "Product", "Revenue", "Cost"]
+    assert plan["preconditions"][0]["type"] == "sheet_exists"
+    assert plan["postconditions"][0]["type"] == "table_exists"
+
+
 def test_cell_set(simple_workbook: Path):
     result = runner.invoke(app, [
         "cell", "set",

@@ -93,6 +93,10 @@ _TABLE_EPILOG = """\
 
 `xl table ls -f data.xlsx`  — list all tables with columns, row counts, sheet locations
 
+`xl table create -f data.xlsx -t Sales -s Revenue --ref A1:D5`  — promote range to table
+
+`xl table create -f data.xlsx -t Metrics -s Sheet1 --ref A1:C1 --columns "Name,Value,Date"`
+
 `xl table add-column -f data.xlsx -t Sales -n Profit --formula "=[@Revenue]-[@Cost]"`
 
 `xl table append-rows -f data.xlsx -t Sales --data '[{"Revenue":100,"Cost":60}]'`
@@ -201,6 +205,7 @@ _VERIFY_EPILOG = """\
 
 **Assertion types and required fields:**
 
+- `table.exists` — fields: `table`
 - `table.column_exists` — fields: `table`, `column`
 - `cell.value_equals` — fields: `ref` (Sheet!Cell), `expected` (value to match; legacy alias: `value`)
 - `cell.not_empty` — fields: `ref` (Sheet!Cell)
@@ -246,7 +251,7 @@ sheet_app = typer.Typer(
     no_args_is_help=True, rich_markup_mode="markdown",
 )
 table_app = typer.Typer(
-    name="table", help="Table operations — list, add columns, append rows.",
+    name="table", help="Table operations — create, list, add columns, append rows.",
     epilog=_TABLE_EPILOG,
     no_args_is_help=True, rich_markup_mode="markdown",
 )
@@ -462,6 +467,7 @@ def guide(
             },
             "plan_generation": {
                 "xl plan add-column": "Generate a plan to add a table column (non-mutating)",
+                "xl plan create-table": "Generate a plan to create an Excel Table from a range (non-mutating)",
                 "xl plan set-cells": "Generate a plan to set cell values (non-mutating)",
                 "xl plan format": "Generate a plan for number formatting (non-mutating)",
                 "xl plan compose": "Merge multiple plan files into one",
@@ -475,6 +481,7 @@ def guide(
             "mutation": {
                 "xl apply": "Apply a patch plan to a workbook (supports --dry-run and --backup)",
                 "xl cell set": "Set a single cell value",
+                "xl table create": "Create an Excel Table from a cell range (promote range to ListObject)",
                 "xl table add-column": "Add a column to an Excel table",
                 "xl table append-rows": "Append rows to an Excel table",
                 "xl formula set": "Set a formula on a cell, range, or table column",
@@ -484,7 +491,7 @@ def guide(
                 "xl range clear": "Clear cell contents and/or formatting",
             },
             "verification": {
-                "xl verify assert": "Run post-apply assertions (table.column_exists, cell.value_equals, cell.not_empty, cell.value_type, table.row_count, table.row_count.gte / row_count.gte)",
+                "xl verify assert": "Run post-apply assertions (table.exists, table.column_exists, cell.value_equals, cell.not_empty, cell.value_type, table.row_count, table.row_count.gte / row_count.gte)",
                 "xl diff compare": "Compare two workbook files cell by cell",
             },
             "automation": {
@@ -495,7 +502,7 @@ def guide(
         "workflow_commands": {
             "description": "Step commands supported in 'xl run' YAML workflows (steps[].run values).",
             "inspection": ["wb.inspect", "sheet.ls", "table.ls", "cell.get", "range.stat", "query", "formula.find", "formula.lint"],
-            "mutation": ["table.add_column", "table.append_rows", "cell.set", "formula.set", "format.number", "format.width", "format.freeze", "range.clear"],
+            "mutation": ["table.create", "table.add_column", "table.append_rows", "cell.set", "formula.set", "format.number", "format.width", "format.freeze", "range.clear"],
             "validation": ["validate.plan", "validate.workbook", "validate.refs", "verify.assert"],
             "other": ["apply", "diff.compare"],
         },
@@ -537,6 +544,8 @@ def guide(
             "ERR_RANGE_INVALID": "Reference format is invalid or sheet not found (exit 10)",
             "ERR_PATTERN_INVALID": "Regex pattern is invalid (exit 10)",
             "ERR_COLUMN_EXISTS": "Column already exists in target table (exit 10)",
+            "ERR_TABLE_EXISTS": "Table name already exists in workbook (exit 10)",
+            "ERR_TABLE_OVERLAP": "Table range overlaps an existing table (exit 10)",
             "ERR_INVALID_ARGUMENT": "Conflicting or malformed arguments provided (exit 10)",
             "ERR_SCHEMA_MISMATCH": "Row data columns don't match table schema (exit 10)",
             "ERR_FORMULA_OVERWRITE_BLOCKED": "Cell contains a formula; use --force-overwrite-formulas (exit 30)",
@@ -984,6 +993,78 @@ def table_append_rows_cmd(
 
 
 # ---------------------------------------------------------------------------
+# xl table create
+# ---------------------------------------------------------------------------
+@table_app.command("create")
+def table_create_cmd(
+    file: FilePath,
+    table: Annotated[str, typer.Option("--table", "-t", help="Display name for the new table (e.g. 'Sales')")],
+    sheet: Annotated[str, typer.Option("--sheet", "-s", help="Sheet name where the table will be created")],
+    ref: Annotated[str, typer.Option("--ref", help="Cell range to promote to table (e.g. 'A1:D5')")],
+    columns: Annotated[Optional[str], typer.Option("--columns", help="Comma-separated column headers (written if header row is empty)")] = None,
+    style: Annotated[str, typer.Option("--style", help="Table style name (e.g. 'TableStyleMedium2')")] = "TableStyleMedium2",
+    backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    json_out: JsonFlag = True,
+):
+    """Create an Excel Table (ListObject) from a cell range. Mutating.
+
+    Promotes an existing data range to an Excel Table object. The first
+    row of the range must contain column headers (or use `--columns` to
+    write headers to an empty first row).
+
+    Example: `xl table create -f data.xlsx -t Sales -s Revenue --ref A1:D5`
+
+    Example: `xl table create -f data.xlsx -t Metrics -s Sheet1 --ref A1:C1 --columns "Name,Value,Date"`
+
+    See also: `xl table ls` to list existing tables, `xl plan create-table` to generate a plan.
+    """
+    from xl.adapters.openpyxl_engine import table_create
+    from xl.io.fileops import backup as make_backup
+
+    col_list = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
+
+    with Timer() as t:
+        ctx = _load_ctx_or_emit(file, "table.create")
+
+        try:
+            change = table_create(ctx, sheet, table, ref, columns=col_list, style=style)
+        except (ValueError, KeyError) as e:
+            ctx.close()
+            err = str(e).lower()
+            if "already exists" in err:
+                code = "ERR_TABLE_EXISTS"
+            elif "overlap" in err:
+                code = "ERR_TABLE_OVERLAP"
+            elif "not found" in err:
+                code = "ERR_SHEET_NOT_FOUND"
+            else:
+                code = "ERR_INVALID_ARGUMENT"
+            env = error_envelope("table.create", code, str(e), target=Target(file=file, sheet=sheet, table=table))
+            _emit(env)
+
+        backup_path = None
+        if not dry_run:
+            if backup:
+                backup_path = make_backup(file)
+            ctx.save(file)
+        ctx.close()
+
+    result = {
+        "dry_run": dry_run,
+        "backup_path": backup_path,
+    }
+    env = success_envelope(
+        "table.create",
+        result,
+        target=Target(file=file, sheet=sheet, table=table),
+        changes=[change],
+        duration_ms=t.elapsed_ms,
+    )
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
 # xl cell set
 # ---------------------------------------------------------------------------
 @cell_app.command("set")
@@ -1250,6 +1331,91 @@ def plan_add_column(
 
 
 # ---------------------------------------------------------------------------
+# xl plan create-table
+# ---------------------------------------------------------------------------
+@plan_app.command("create-table")
+def plan_create_table(
+    file: FilePath,
+    table: Annotated[str, typer.Option("--table", "-t", help="Display name for the new table")],
+    sheet: Annotated[str, typer.Option("--sheet", "-s", help="Sheet name where the table will be created")],
+    ref: Annotated[str, typer.Option("--ref", help="Cell range for the table (e.g. 'A1:D5')")],
+    columns: Annotated[Optional[str], typer.Option("--columns", help="Comma-separated column headers")] = None,
+    style: Annotated[str, typer.Option("--style", help="Table style name")] = "TableStyleMedium2",
+    append: Annotated[Optional[str], typer.Option("--append", help="Path to existing plan file to append to")] = None,
+    out: Annotated[Optional[str], typer.Option("--out", "-o", help="Write raw patch plan JSON to file")] = None,
+    json_out: JsonFlag = True,
+):
+    """Generate a plan to create an Excel Table from a range. Non-mutating.
+
+    Outputs a patch plan envelope to stdout.
+    Use `--out` to write a raw patch plan file for `xl validate plan` / `xl apply`.
+    Use `--append` to append to (or create) a raw patch plan file.
+
+    Example: `xl plan create-table -f data.xlsx -t Sales -s Revenue --ref A1:D5 --out plan.json`
+
+    See also: `xl table create` to apply directly, `xl apply` to execute this plan.
+    """
+    from xl.io.fileops import fingerprint
+
+    col_list = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
+
+    fp = fingerprint(file) if Path(file).exists() else None
+    plan_id = f"pln_{datetime.now(timezone.utc).strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
+
+    op = Operation(
+        op_id=f"op_{uuid.uuid4().hex[:6]}",
+        type="table.create",
+        table=table,
+        sheet=sheet,
+        ref=ref,
+        columns=col_list,
+        style=style,
+    )
+    pre = Precondition(type="sheet_exists", sheet=sheet)
+    post = Postcondition(type="table_exists", table=table)
+
+    if append:
+        if Path(append).exists():
+            try:
+                plan = _load_patch_plan(append)
+            except ValueError as e:
+                _emit_invalid_plan("plan.create_table", file, str(e))
+                return
+            if plan.target.file and Path(plan.target.file).resolve() != Path(file).resolve():
+                env = error_envelope(
+                    "plan.create_table",
+                    "ERR_VALIDATION_FAILED",
+                    f"Append plan target file '{plan.target.file}' does not match '{file}'",
+                    target=Target(file=file),
+                )
+                _emit(env)
+                return
+        else:
+            plan = PatchPlan(
+                plan_id=plan_id,
+                target=PlanTarget(file=file, fingerprint=fp),
+            )
+        plan.operations.append(op)
+        plan.preconditions.append(pre)
+        plan.postconditions.append(post)
+        _write_plan(append, plan)
+    else:
+        plan = PatchPlan(
+            plan_id=plan_id,
+            target=PlanTarget(file=file, fingerprint=fp),
+            preconditions=[pre],
+            operations=[op],
+            postconditions=[post],
+        )
+
+    if out:
+        _write_plan(out, plan)
+
+    env = success_envelope("plan.create_table", plan.model_dump(), target=Target(file=file, sheet=sheet, table=table))
+    _emit(env)
+
+
+# ---------------------------------------------------------------------------
 # xl plan set-cells
 # ---------------------------------------------------------------------------
 @plan_app.command("set-cells")
@@ -1509,6 +1675,7 @@ def apply_cmd(
         resolve_table_column_ref,
         table_add_column,
         table_append_rows,
+        table_create,
     )
     from xl.io.fileops import backup as make_backup
     from xl.io.fileops import fingerprint
@@ -1581,6 +1748,10 @@ def apply_cmd(
                     if sheet_name:
                         change = format_number(ctx, sheet_name, actual_ref, style=op.style or "number", decimals=op.decimals if op.decimals is not None else 2)
                         changes.append(change)
+                elif op.type == "table.create":
+                    change = table_create(ctx, op.sheet or "", op.table or "", op.ref or "",
+                                          columns=op.columns, style=op.style or "TableStyleMedium2")
+                    changes.append(change)
                 else:
                     changes.append(ChangeRecord(
                         op_id=op.op_id,
@@ -1914,7 +2085,7 @@ def formula_set_cmd(
     formula: Annotated[str, typer.Option("--formula", help="Excel formula (e.g. '=C2-D2' or '=[@Revenue]-[@Cost]')")],
     force_overwrite_values: Annotated[bool, typer.Option("--force-overwrite-values", help="Allow overwriting cells that contain plain values")] = False,
     force_overwrite_formulas: Annotated[bool, typer.Option("--force-overwrite-formulas", help="Allow overwriting cells that already contain formulas")] = False,
-    fill_mode: Annotated[str, typer.Option("--fill-mode", help="'fixed' copies formula literally; 'relative' adjusts A1-refs per cell (like Excel fill-down)")] = "fixed",
+    fill_mode: Annotated[str, typer.Option("--fill-mode", help="'fixed' copies formula literally; 'relative' adjusts A1-refs per cell (like Excel fill-down)")] = "relative",
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
     json_out: JsonFlag = True,
@@ -2632,6 +2803,15 @@ def main() -> None:
         )
         print_response(env)
         raise SystemExit(90) from exc
+    finally:
+        # Suppress openpyxl PermissionError during temp-file cleanup on Windows.
+        # openpyxl registers an atexit handler that may fail with [WinError 32]
+        # when temp files are still locked. Registering here (after openpyxl's
+        # handler) means atexit LIFO runs ours first, silencing stderr.
+        if sys.platform == "win32":
+            import atexit
+            import io
+            atexit.register(lambda: setattr(sys, "stderr", io.StringIO()))
 
 
 if __name__ == "__main__":

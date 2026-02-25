@@ -108,6 +108,22 @@ def multi_table_workbook(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
+def raw_data_workbook(tmp_path: Path) -> Path:
+    """Create a workbook with raw data (no Excel Tables)."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Name", "Value", "Category"])
+    ws.append(["Alpha", 100, "A"])
+    ws.append(["Beta", 200, "B"])
+    ws.append(["Gamma", 300, "A"])
+    path = tmp_path / "raw_data.xlsx"
+    wb.save(str(path))
+    wb.close()
+    return path
+
+
+@pytest.fixture()
 def sample_plan(simple_workbook: Path) -> dict:
     """Create a sample patch plan dict."""
     from xl.io.fileops import fingerprint

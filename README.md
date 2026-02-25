@@ -168,13 +168,13 @@ xl diff compare --file-a original.xlsx --file-b modified.xlsx
 |---|---|---|
 | `xl wb` | `inspect`, `lock-status` | Workbook metadata, fingerprint, lock status |
 | `xl sheet` | `ls` | List sheets with dimensions |
-| `xl table` | `ls`, `add-column`, `append-rows` | Table operations |
+| `xl table` | `create`, `ls`, `add-column`, `append-rows` | Table operations |
 | `xl cell` | `get`, `set` | Read/write individual cells |
 | `xl range` | `stat`, `clear` | Range statistics and clearing |
 | `xl formula` | `set`, `lint`, `find` | Set formulas, lint for issues, search by regex |
 | `xl format` | `number`, `width`, `freeze` | Number formats, column widths, freeze panes |
 | `xl query` | _(top-level)_ | SQL queries over table data via DuckDB |
-| `xl plan` | `show`, `add-column`, `set-cells`, `format`, `compose` | Generate and compose patch plans |
+| `xl plan` | `show`, `add-column`, `create-table`, `set-cells`, `format`, `compose` | Generate and compose patch plans |
 | `xl validate` | `workbook`, `plan`, `refs` | Validate health, plans, and references |
 | `xl apply` | _(top-level)_ | Apply patch plans with `--dry-run` and `--backup` |
 | `xl verify` | `assert` | Post-apply assertions |

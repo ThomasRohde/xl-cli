@@ -30,9 +30,10 @@ STEP_ARG_SCHEMA: dict[str, dict[str, list[str]]] = {
     "query": {"required": ["sql"], "optional": []},
     "formula.find": {"required": ["pattern"], "optional": ["sheet"]},
     "formula.lint": {"required": [], "optional": ["sheet"]},
+    "table.create": {"required": ["sheet", "table", "ref"], "optional": ["columns", "style"]},
     "table.add_column": {"required": ["table", "name"], "optional": ["formula", "default_value"]},
     "table.append_rows": {"required": ["table", "rows"], "optional": ["schema_mode"]},
-    "cell.set": {"required": ["ref", "value"], "optional": ["force_overwrite_formulas"]},
+    "cell.set": {"required": ["ref", "value"], "optional": ["force_overwrite_formulas", "type"]},
     "formula.set": {"required": ["ref", "formula"], "optional": ["force_overwrite_values", "force_overwrite_formulas", "fill_mode"]},
     "format.number": {"required": ["ref"], "optional": ["style", "decimals"]},
     "format.width": {"required": ["sheet", "columns", "width"], "optional": []},
@@ -54,7 +55,7 @@ WORKFLOW_COMMANDS: frozenset[str] = frozenset({
     "cell.get", "range.stat", "query",
     "formula.find", "formula.lint",
     # Mutation
-    "table.add_column", "table.append_rows",
+    "table.create", "table.add_column", "table.append_rows",
     "cell.set", "formula.set",
     "format.number", "format.width", "format.freeze",
     "range.clear",
@@ -252,7 +253,7 @@ def load_workflow(path: str | Path) -> WorkflowSpec:
 
 
 _MUTATING_STEPS = frozenset({
-    "table.add_column", "table.append_rows", "cell.set", "formula.set",
+    "table.create", "table.add_column", "table.append_rows", "cell.set", "formula.set",
     "format.number", "format.width", "format.freeze", "range.clear",
     "apply",
 })
@@ -327,6 +328,7 @@ def execute_workflow(
         range_stat,
         table_add_column,
         table_append_rows,
+        table_create,
     )
     from xl.engine.context import WorkbookContext
     from xl.validation.validators import validate_plan, validate_workbook
@@ -401,6 +403,20 @@ def execute_workflow(
                 step_result["ok"] = True
 
             # -- Mutation --
+            elif step.run == "table.create":
+                columns_arg = step.args.get("columns")
+                change = table_create(
+                    ctx,
+                    step.args["sheet"],
+                    step.args["table"],
+                    step.args["ref"],
+                    columns=columns_arg,
+                    style=step.args.get("style", "TableStyleMedium2"),
+                )
+                mutated = True
+                step_result["result"] = change.model_dump()
+                step_result["ok"] = True
+
             elif step.run == "table.add_column":
                 change = table_add_column(
                     ctx,
@@ -428,7 +444,22 @@ def execute_workflow(
             elif step.run == "cell.set":
                 ref = step.args["ref"]
                 sheet_name, cell_ref = _split_ref(ref)
-                change = cell_set(ctx, sheet_name, cell_ref, step.args["value"])
+                cell_type = step.args.get("type")
+                value = step.args["value"]
+                if cell_type == "number" and isinstance(value, str):
+                    try:
+                        value = float(value)
+                        if value == int(value):
+                            value = int(value)
+                    except ValueError:
+                        pass
+                elif cell_type == "bool" and isinstance(value, str):
+                    value = value.lower() in ("true", "1", "yes")
+                change = cell_set(
+                    ctx, sheet_name, cell_ref, value,
+                    cell_type=cell_type,
+                    force_overwrite_formulas=step.args.get("force_overwrite_formulas", False),
+                )
                 mutated = True
                 step_result["result"] = change.model_dump()
                 step_result["ok"] = True
@@ -440,7 +471,7 @@ def execute_workflow(
                     ctx, sheet_name, cell_ref, step.args["formula"],
                     force_overwrite_values=step.args.get("force_overwrite_values", False),
                     force_overwrite_formulas=step.args.get("force_overwrite_formulas", False),
-                    fill_mode=step.args.get("fill_mode", "fixed"),
+                    fill_mode=step.args.get("fill_mode", "relative"),
                 )
                 mutated = True
                 step_result["result"] = change.model_dump()
@@ -461,6 +492,8 @@ def execute_workflow(
             elif step.run == "format.width":
                 sheet_name = step.args.get("sheet", "")
                 columns = step.args.get("columns", [])
+                if isinstance(columns, str):
+                    columns = [c.strip().upper() for c in columns.split(",") if c.strip()]
                 width = step.args.get("width", 10)
                 change = format_width(ctx, sheet_name, columns, width)
                 mutated = True
@@ -550,6 +583,10 @@ def execute_workflow(
                             changes.append(change.model_dump())
                         elif op.type == "table.append_rows":
                             change = table_append_rows(ctx, op.table, op.rows or [])
+                            changes.append(change.model_dump())
+                        elif op.type == "table.create":
+                            change = table_create(ctx, op.sheet or "", op.table or "", op.ref or "",
+                                                  columns=op.columns, style=op.style or "TableStyleMedium2")
                             changes.append(change.model_dump())
                     mutated = True
                     step_result["result"] = {"applied": True, "operations": len(changes), "changes": changes}

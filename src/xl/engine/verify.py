@@ -30,7 +30,17 @@ def run_assertions(
 def _check_assertion(ctx: WorkbookContext, assertion: dict[str, Any]) -> dict[str, Any]:
     a_type = assertion["type"]
 
-    if a_type == "table.column_exists":
+    if a_type == "table.exists":
+        table_name = assertion["table"]
+        result = ctx.find_table(table_name)
+        found = result is not None
+        return {
+            "type": a_type,
+            "passed": found,
+            "message": f"Table '{table_name}' {'exists' if found else 'not found'}",
+        }
+
+    elif a_type == "table.column_exists":
         table_name = assertion["table"]
         column = assertion["column"]
         result = ctx.find_table(table_name)
@@ -134,7 +144,13 @@ def _check_assertion(ctx: WorkbookContext, assertion: dict[str, Any]) -> dict[st
 
     elif a_type == "cell.value_type":
         ref = assertion["ref"]
-        expected_type = assertion["expected_type"]
+        expected_type = assertion.get("expected_type") or assertion.get("expected")
+        if expected_type is None:
+            return {
+                "type": a_type,
+                "passed": False,
+                "message": "cell.value_type requires 'expected_type' (or alias 'expected')",
+            }
         sheet_name, cell_ref = ref.split("!", 1) if "!" in ref else ("", ref)
         from xl.adapters.openpyxl_engine import cell_get
         cell_data = cell_get(ctx, sheet_name, cell_ref)

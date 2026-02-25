@@ -578,3 +578,89 @@ def test_workflow_invalid_step_rejected_at_parse_time(simple_workbook: Path, tmp
     data = _json(result.stdout)
     assert data["ok"] is False
     assert data["errors"][0]["code"] == "ERR_WORKFLOW_INVALID"
+
+
+# ---------------------------------------------------------------------------
+# REPORT.md blind-test regression fixes
+# ---------------------------------------------------------------------------
+
+
+def test_verify_cell_value_type_accepts_expected_alias(simple_workbook: Path):
+    """§4.7 — cell.value_type should accept 'expected' as alias for 'expected_type'."""
+    assertions = json.dumps([
+        {"type": "cell.value_type", "ref": "Revenue!C2", "expected": "number"},
+    ])
+    result = runner.invoke(
+        app,
+        ["verify", "assert", "--file", str(simple_workbook), "--assertions", assertions],
+    )
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+    assert data["result"]["assertions"][0]["passed"] is True
+
+
+def test_workflow_cell_set_with_type_arg(simple_workbook: Path, tmp_path: Path):
+    """§4.3 — Workflow cell.set should accept 'type' arg for coercion."""
+    wf_path = tmp_path / "wf_cell_type.yaml"
+    workflow = {
+        "schema_version": "1.0",
+        "name": "cell_type_test",
+        "target": {"file": str(simple_workbook)},
+        "steps": [
+            {"id": "s1", "run": "cell.set", "args": {"ref": "Summary!C1", "value": "42", "type": "number"}},
+        ],
+    }
+    wf_path.write_text(yaml.safe_dump(workflow))
+
+    result = runner.invoke(app, ["run", "--workflow", str(wf_path), "--file", str(simple_workbook)])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+
+    get_result = runner.invoke(app, ["cell", "get", "--file", str(simple_workbook), "--ref", "Summary!C1"])
+    get_data = _json(get_result.stdout)
+    assert get_data["result"]["value"] == 42
+    assert get_data["result"]["type"] == "number"
+
+
+def test_workflow_format_width_comma_separated_columns(simple_workbook: Path, tmp_path: Path):
+    """§4.2 — Workflow format.width should accept columns as comma-separated string."""
+    wf_path = tmp_path / "wf_width.yaml"
+    workflow = {
+        "schema_version": "1.0",
+        "name": "width_test",
+        "target": {"file": str(simple_workbook)},
+        "steps": [
+            {"id": "s1", "run": "format.width", "args": {"sheet": "Revenue", "columns": "A,B", "width": 20}},
+        ],
+    }
+    wf_path.write_text(yaml.safe_dump(workflow))
+
+    result = runner.invoke(app, ["run", "--workflow", str(wf_path), "--file", str(simple_workbook)])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    assert data["result"]["steps"][0]["ok"] is True
+
+
+def test_formula_set_range_defaults_to_relative(simple_workbook: Path):
+    """§4.1 — Range formula set without --fill-mode should default to relative."""
+    import openpyxl
+
+    result = runner.invoke(app, [
+        "formula", "set",
+        "--file", str(simple_workbook),
+        "--ref", "Revenue!E2:E5",
+        "--formula", "=C2*D2",
+        # No --fill-mode flag: should default to relative
+    ])
+    assert result.exit_code == 0
+    data = _json(result.stdout)
+    assert data["ok"] is True
+
+    wb = openpyxl.load_workbook(str(simple_workbook))
+    ws = wb["Revenue"]
+    assert ws["E2"].value == "=C2*D2"
+    assert ws["E3"].value == "=C3*D3"
+    assert ws["E4"].value == "=C4*D4"
+    assert ws["E5"].value == "=C5*D5"
+    wb.close()

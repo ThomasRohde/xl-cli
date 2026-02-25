@@ -9,6 +9,7 @@ from xl.adapters.openpyxl_engine import (
     format_number,
     table_add_column,
     table_append_rows,
+    table_create,
 )
 from xl.engine.context import WorkbookContext
 
@@ -116,4 +117,85 @@ def test_format_percent(simple_workbook: Path):
     change = format_number(ctx, "Revenue", "C2:C5", style="percent", decimals=1)
     ws = ctx.wb["Revenue"]
     assert ws.cell(row=2, column=3).number_format == "0.0%"
+    ctx.close()
+
+
+# ---------------------------------------------------------------------------
+# table_create tests
+# ---------------------------------------------------------------------------
+def test_table_create_from_existing_data(raw_data_workbook: Path):
+    """Create a table from a range that already has headers and data."""
+    ctx = WorkbookContext(raw_data_workbook)
+    change = table_create(ctx, "Data", "Metrics", "A1:C4")
+    assert change.type == "table.create"
+    assert "Metrics" in change.target
+    assert change.after["columns"] == ["Name", "Value", "Category"]
+    assert change.after["ref"] == "A1:C4"
+    assert change.impact["rows"] == 3  # 3 data rows
+
+    # Verify table exists
+    tables = ctx.list_tables()
+    assert len(tables) == 1
+    assert tables[0].name == "Metrics"
+    ctx.close()
+
+
+def test_table_create_with_columns(tmp_path: Path):
+    """Create a table with explicit column headers on empty range."""
+    from openpyxl import Workbook as WB
+
+    wb = WB()
+    ws = wb.active
+    ws.title = "Sheet1"
+    path = tmp_path / "empty.xlsx"
+    wb.save(str(path))
+    wb.close()
+
+    ctx = WorkbookContext(path)
+    change = table_create(ctx, "Sheet1", "NewTable", "A1:C1",
+                          columns=["Col1", "Col2", "Col3"])
+    assert change.type == "table.create"
+    assert change.after["columns"] == ["Col1", "Col2", "Col3"]
+
+    # Verify headers were written
+    ws = ctx.wb["Sheet1"]
+    assert ws.cell(row=1, column=1).value == "Col1"
+    assert ws.cell(row=1, column=2).value == "Col2"
+    assert ws.cell(row=1, column=3).value == "Col3"
+    ctx.close()
+
+
+def test_table_create_duplicate_name(simple_workbook: Path):
+    """Error when table name already exists."""
+    ctx = WorkbookContext(simple_workbook)
+    with pytest.raises(ValueError, match="already exists"):
+        table_create(ctx, "Revenue", "Sales", "F1:H3",
+                     columns=["X", "Y", "Z"])
+    ctx.close()
+
+
+def test_table_create_overlap(simple_workbook: Path):
+    """Error when range overlaps existing table."""
+    ctx = WorkbookContext(simple_workbook)
+    with pytest.raises(ValueError, match="overlap"):
+        table_create(ctx, "Revenue", "NewTable", "A1:D3",
+                     columns=["A", "B", "C", "D"])
+    ctx.close()
+
+
+def test_table_create_invalid_name(tmp_path: Path):
+    """Error for invalid table name format."""
+    from openpyxl import Workbook as WB
+
+    wb = WB()
+    ws = wb.active
+    ws.title = "Data"
+    path = tmp_path / "test.xlsx"
+    wb.save(str(path))
+    wb.close()
+
+    ctx = WorkbookContext(path)
+    with pytest.raises(ValueError, match="Invalid table name"):
+        table_create(ctx, "Data", "123bad", "A1:C1",
+                     columns=["X", "Y", "Z"])
     ctx.close()

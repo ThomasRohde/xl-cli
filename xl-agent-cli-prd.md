@@ -438,6 +438,17 @@ List sheets with:
 - table count
 
 ## `xl table`
+### `xl table create`
+Creates an Excel Table (ListObject) from a cell range; supports:
+- `--sheet` / `-s` — target sheet (required)
+- `--table` / `-t` — display name for the table (required)
+- `--ref` — cell range to promote (e.g. `A1:D5`) (required)
+- `--columns` — comma-separated column headers (written if header row is empty)
+- `--style` — table style name (default: `TableStyleMedium2`)
+- `--dry-run`, `--backup` — standard safety flags
+
+Validates: table name uniqueness, range overlap with existing tables, header row presence.
+
 ### `xl table ls`
 Lists tables with:
 - sheet
@@ -758,9 +769,9 @@ Optional `--emit-events` streams lifecycle events:
 - [x] Exit code taxonomy (0/10/20/30/40/50/60/70/90)
 
 ### Milestone 1 — Table-first inspect/mutate ✅ COMPLETE
-- [x] `table ls`, `table add-column`, `table append-rows`
+- [x] `table create`, `table ls`, `table add-column`, `table append-rows`
 - [x] patch plan schema + `plan show`
-- [x] `plan add-column`, `plan set-cells`, `plan format`, `plan compose`
+- [x] `plan add-column`, `plan create-table`, `plan set-cells`, `plan format`, `plan compose`
 - [x] `apply --dry-run` + `apply` with backup and fingerprint conflict detection
 - [x] `cell set` with formula overwrite protection
 - [x] `validate workbook` and `validate plan`

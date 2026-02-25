@@ -82,7 +82,7 @@ def test_run_workflow_with_mutation(simple_workbook: Path, tmp_path: Path):
 
 
 def test_run_workflow_step_failure(simple_workbook: Path, tmp_path: Path):
-    """Workflow with a failing step."""
+    """Workflow with an unknown step command is rejected at parse time."""
     workflow = {
         "schema_version": "1.0",
         "name": "test_fail",
@@ -101,7 +101,7 @@ def test_run_workflow_step_failure(simple_workbook: Path, tmp_path: Path):
     ])
     data = json.loads(result.stdout)
     assert data["ok"] is False
-    assert data["result"]["steps_passed"] == 0
+    assert data["errors"][0]["code"] == "ERR_WORKFLOW_INVALID"
 
 
 def test_run_workflow_target_from_file(simple_workbook: Path, tmp_path: Path):
@@ -260,3 +260,37 @@ def test_stdio_server_missing_file():
         "args": {},
     })
     assert response["ok"] is False
+
+
+def test_stdio_server_version():
+    """StdioServer should handle version without requiring file."""
+    from xl.server.stdio import StdioServer
+
+    server = StdioServer()
+    response = server.handle_request({"id": "v1", "command": "version", "args": {}})
+    assert response["ok"] is True
+    assert "version" in response["result"]
+
+
+def test_stdio_server_guide():
+    """StdioServer should handle guide without requiring file."""
+    from xl.server.stdio import StdioServer
+
+    server = StdioServer()
+    response = server.handle_request({"id": "g1", "command": "guide", "args": {}})
+    assert response["ok"] is True
+    assert "supported_commands" in response["result"]
+
+
+def test_stdio_server_formula_find(simple_workbook: Path):
+    """StdioServer should handle formula.find."""
+    from xl.server.stdio import StdioServer
+
+    server = StdioServer()
+    response = server.handle_request({
+        "id": "ff1",
+        "command": "formula.find",
+        "args": {"file": str(simple_workbook), "pattern": "SUM"},
+    })
+    assert response["ok"] is True
+    server._close_all()

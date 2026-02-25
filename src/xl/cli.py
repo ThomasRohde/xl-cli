@@ -27,6 +27,7 @@ from xl.engine.dispatcher import (
     print_response,
     success_envelope,
 )
+from xl.io.fileops import read_text_safe
 from xl.observe.events import Timer
 
 # ---------------------------------------------------------------------------
@@ -56,7 +57,7 @@ Agent-first CLI for reading, transforming, and validating Excel workbooks (.xlsx
 - `--backup` creates a timestamped .bak copy before writing
 - Fingerprint-based conflict detection prevents stale overwrites
 
-**Exit codes:** 0=success, 10=validation, 20=protection, 30=formula, 40=conflict, 50=io, 90=internal
+**Exit codes:** 0=success, 10=validation, 20=protection, 30=formula, 40=conflict, 50=io, 60=recalc, 70=unsupported, 90=internal
 
 Run `xl guide` for a comprehensive machine-readable orientation.
 """
@@ -188,9 +189,19 @@ _VERIFY_EPILOG = """\
 
 `xl verify assert -f data.xlsx --assertions '[{"type":"table.column_exists","table":"Sales","column":"Margin"}]'`
 
+`xl verify assert -f data.xlsx --assertions '[{"type":"cell.value_equals","ref":"Sheet1!B2","expected":42}]'`
+
 `xl verify assert -f data.xlsx --assertions-file assertions.json`
 
-**Assertion types:** `table.column_exists`, `cell.value_equals`, `cell.not_empty`, `table.row_count`, `row_count.gte`.
+**Assertion types and required fields:**
+
+- `table.column_exists` — fields: `table`, `column`
+- `cell.value_equals` — fields: `ref` (Sheet!Cell), `expected` (value to match; legacy alias: `value`)
+- `cell.not_empty` — fields: `ref` (Sheet!Cell)
+- `cell.value_type` — fields: `ref` (Sheet!Cell), `expected_type` (one of: number, text, formula, bool, empty)
+- `table.row_count` — fields: `table`, plus one of: `expected` (exact), `min`, `max`
+- `table.row_count.gte` / `row_count.gte` — fields: `table`, `min_rows` (or `min`)
+
 Run after `xl apply` to confirm the workbook is in the expected state.
 """
 
@@ -204,6 +215,12 @@ _DIFF_EPILOG = """\
 Returns cell-level changes, sheets added/removed, and fingerprint comparison.
 Useful for reviewing changes after `xl apply`.
 """
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(xl.__version__)
+        raise typer.Exit()
+
 
 app = typer.Typer(
     name="xl",
@@ -288,6 +305,17 @@ app.add_typer(plan_app)
 app.add_typer(verify_app)
 app.add_typer(diff_app)
 
+
+@app.callback(invoke_without_command=True)
+def main(
+    version: Annotated[
+        bool, typer.Option("--version", "-V", help="Print version and exit.", is_eager=True)
+    ] = False,
+) -> None:
+    if version:
+        _version_callback(True)
+
+
 # Type aliases for common options
 FilePath = Annotated[str, typer.Option("--file", "-f", help="Path to .xlsx/.xlsm workbook file")]
 JsonFlag = Annotated[bool, typer.Option("--json", help="JSON output (always on — all output is JSON)")]
@@ -312,7 +340,7 @@ def _load_patch_plan(
 ) -> PatchPlan:
     """Load and validate a raw PatchPlan JSON file."""
     try:
-        data = json.loads(Path(plan_path).read_text())
+        data = json.loads(read_text_safe(plan_path))
     except Exception as e:
         raise ValueError(f"Cannot parse plan: {e}") from e
 
@@ -320,10 +348,15 @@ def _load_patch_plan(
         raise ValueError("Plan file must contain a JSON object.")
 
     if {"ok", "command", "result"}.issubset(data):
-        raise ValueError(
-            "Plan file contains a ResponseEnvelope, not a raw patch plan body. "
-            "Use the `result` object or write plans with --out."
-        )
+        # Auto-extract the plan body from a ResponseEnvelope for convenience.
+        inner = data.get("result")
+        if isinstance(inner, dict) and "target" in inner and "operations" in inner:
+            data = inner
+        else:
+            raise ValueError(
+                "Plan file contains a ResponseEnvelope, but its 'result' is not a "
+                "valid patch plan body. Use --out to write raw plan files."
+            )
 
     missing = [k for k in ("target", "operations") if k not in data]
     if missing:
@@ -430,13 +463,20 @@ def guide(
                 "xl range clear": "Clear cell contents and/or formatting",
             },
             "verification": {
-                "xl verify assert": "Run post-apply assertions (table.column_exists, cell.value_equals, etc.)",
+                "xl verify assert": "Run post-apply assertions (table.column_exists, cell.value_equals, cell.not_empty, cell.value_type, table.row_count, table.row_count.gte / row_count.gte)",
                 "xl diff compare": "Compare two workbook files cell by cell",
             },
             "automation": {
                 "xl run": "Execute a multi-step YAML workflow",
                 "xl serve --stdio": "Start stdio server for agent tool integration (MCP/ACP)",
             },
+        },
+        "workflow_commands": {
+            "description": "Step commands supported in 'xl run' YAML workflows (steps[].run values).",
+            "inspection": ["wb.inspect", "sheet.ls", "table.ls", "cell.get", "range.stat", "query", "formula.find", "formula.lint"],
+            "mutation": ["table.add_column", "table.append_rows", "cell.set", "formula.set", "format.number", "format.width", "format.freeze", "range.clear"],
+            "validation": ["validate.plan", "validate.workbook", "validate.refs", "verify.assert"],
+            "other": ["apply", "diff.compare"],
         },
         "ref_syntax": {
             "description": "Reference formats used by cell, range, formula, and format commands.",
@@ -496,6 +536,8 @@ def guide(
             "30": "Formula error (overwrite blocked, parse failure)",
             "40": "Conflict (fingerprint mismatch — workbook changed)",
             "50": "IO error (file not found, locked, permission denied)",
+            "60": "Recalculation error",
+            "70": "Unsupported feature or operation",
             "90": "Internal error (unexpected failure)",
         },
         "safety": {
@@ -752,9 +794,19 @@ def table_append_rows_cmd(
 
     # Parse row data
     if data:
-        rows = json.loads(data)
+        try:
+            rows = json.loads(data)
+        except json.JSONDecodeError as e:
+            env = error_envelope("table.append_rows", "ERR_INVALID_ARGUMENT", f"Malformed JSON in --data: {e}", target=Target(file=file, table=table))
+            _emit(env)
+            return
     elif data_file:
-        rows = json.loads(Path(data_file).read_text())
+        try:
+            rows = json.loads(read_text_safe(data_file))
+        except (json.JSONDecodeError, OSError) as e:
+            env = error_envelope("table.append_rows", "ERR_INVALID_ARGUMENT", f"Cannot read --data-file: {e}", target=Target(file=file, table=table))
+            _emit(env)
+            return
     else:
         env = error_envelope("table.append_rows", "ERR_MISSING_DATA", "Provide --data or --data-file", target=Target(file=file, table=table))
         _emit(env)
@@ -1081,6 +1133,7 @@ def plan_set_cells(
     ref: Annotated[str, typer.Option("--ref", help="Cell reference as SheetName!Cell (e.g. Sheet1!B2)")],
     value: Annotated[str, typer.Option("--value", help="Value to set (coerced according to --type)")],
     cell_type: Annotated[Optional[str], typer.Option("--type", help="Value type: 'number', 'text', or 'bool'")] = None,
+    append: Annotated[Optional[str], typer.Option("--append", help="Path to existing plan file to append this operation to")] = None,
     out: Annotated[Optional[str], typer.Option("--out", "-o", help="Write raw patch plan JSON to this file")] = None,
     json_out: JsonFlag = True,
 ):
@@ -1088,6 +1141,7 @@ def plan_set_cells(
 
     Outputs a patch plan envelope to stdout.
     Use `--out` to write a raw patch plan file.
+    Use `--append` to append to (or create) a raw patch plan file.
 
     Example: `xl plan set-cells -f data.xlsx --ref "Sheet1!B2" --value 42 --type number`
 
@@ -1119,12 +1173,38 @@ def plan_set_cells(
         cell_type=cell_type,
     )
 
-    plan = PatchPlan(
-        plan_id=plan_id,
-        target=PlanTarget(file=file, fingerprint=fp),
-        preconditions=[Precondition(type="sheet_exists", sheet=sheet_name)] if sheet_name else [],
-        operations=[op],
-    )
+    if append:
+        if Path(append).exists():
+            try:
+                plan = _load_patch_plan(append)
+            except ValueError as e:
+                _emit_invalid_plan("plan.set_cells", file, str(e))
+                return
+            if plan.target.file and Path(plan.target.file).resolve() != Path(file).resolve():
+                env = error_envelope(
+                    "plan.set_cells",
+                    "ERR_VALIDATION_FAILED",
+                    f"Append plan target file '{plan.target.file}' does not match '{file}'",
+                    target=Target(file=file),
+                )
+                _emit(env)
+                return
+        else:
+            plan = PatchPlan(
+                plan_id=plan_id,
+                target=PlanTarget(file=file, fingerprint=fp),
+            )
+        plan.operations.append(op)
+        if sheet_name:
+            plan.preconditions.append(Precondition(type="sheet_exists", sheet=sheet_name))
+        _write_plan(append, plan)
+    else:
+        plan = PatchPlan(
+            plan_id=plan_id,
+            target=PlanTarget(file=file, fingerprint=fp),
+            preconditions=[Precondition(type="sheet_exists", sheet=sheet_name)] if sheet_name else [],
+            operations=[op],
+        )
 
     if out:
         _write_plan(out, plan)
@@ -1486,6 +1566,18 @@ def query_cmd(
                     data_rows.append(row_data)
 
                 if data_rows:
+                    # Deduplicate column names — suffix duplicates to avoid DuckDB catalog errors
+                    seen: dict[str, int] = {}
+                    deduped_col_names: list[str] = []
+                    for cn in col_names:
+                        if cn in seen:
+                            seen[cn] += 1
+                            deduped_col_names.append(f"{cn}_{seen[cn]}")
+                        else:
+                            seen[cn] = 0
+                            deduped_col_names.append(cn)
+                    col_names = deduped_col_names
+
                     # Build column defs and insert via parameterized VALUES for DuckDB compat
                     col_defs = []
                     for col_name in col_names:
@@ -1575,7 +1667,19 @@ def cell_get_cmd(
             return
         ctx.close()
 
+    warnings: list[WarningDetail] = []
+    if data_only and result.get("value") is None and result.get("type") == "empty":
+        warnings.append(WarningDetail(
+            code="WARN_UNCACHED_FORMULA",
+            message=(
+                "Cell appears empty in data-only mode. It may contain a formula "
+                "whose cached value was not saved by the last application that wrote "
+                "this workbook. Re-run without --data-only to see the formula text."
+            ),
+        ))
     env = success_envelope("cell.get", result, target=Target(file=file, ref=ref), duration_ms=t.elapsed_ms)
+    if warnings:
+        env.warnings = warnings
     _emit(env)
 
 
@@ -2150,8 +2254,10 @@ def verify_assert_cmd(
     """Run post-apply assertions to verify workbook state.
 
     Checks that the workbook matches expected conditions after mutations.
-    Returns `ok: false` if any assertion fails. Assertion types include
-    `table.column_exists`, `cell.value_equals`, `cell.not_empty`, `table.row_count`, `row_count.gte`.
+    Returns `ok: false` if any assertion fails.
+
+    **Assertion types:** `table.column_exists`, `cell.value_equals`, `cell.not_empty`,
+    `cell.value_type`, `table.row_count`, `table.row_count.gte` (alias: `row_count.gte`).
 
     Example: `xl verify assert -f data.xlsx --assertions '[{"type":"table.column_exists","table":"Sales","column":"Margin"}]'`
 
@@ -2175,7 +2281,7 @@ def verify_assert_cmd(
         if assertions:
             assertion_list = json.loads(assertions)
         else:
-            assertion_list = json.loads(Path(assertions_file).read_text())
+            assertion_list = json.loads(read_text_safe(assertions_file))
     except Exception as e:
         env = error_envelope("verify.assert", "ERR_VALIDATION_FAILED", f"Cannot parse assertions: {e}", target=Target(file=file))
         _emit(env)
@@ -2221,12 +2327,14 @@ def diff_compare_cmd(
     file_a: Annotated[str, typer.Option("--file-a", help="First (original/before) workbook path")],
     file_b: Annotated[str, typer.Option("--file-b", help="Second (modified/after) workbook path")],
     sheet: SheetOpt = None,
+    include_formulas: Annotated[bool, typer.Option("--include-formulas", help="Include formula text changes in addition to value changes")] = False,
     json_out: JsonFlag = True,
 ):
     """Compare two workbook files cell by cell.
 
     Returns cell-level value changes, sheets added/removed, and fingerprint
     comparison. Use `--sheet` to limit comparison to a single sheet.
+    Use `--include-formulas` to also compare formula text (loads workbooks twice).
 
     Example: `xl diff compare --file-a original.xlsx --file-b modified.xlsx`
 
@@ -2238,7 +2346,7 @@ def diff_compare_cmd(
 
     with Timer() as t:
         try:
-            result = diff_workbooks(file_a, file_b, sheet_filter=sheet)
+            result = diff_workbooks(file_a, file_b, sheet_filter=sheet, include_formulas=include_formulas)
         except FileNotFoundError as e:
             env = error_envelope("diff.compare", "ERR_WORKBOOK_NOT_FOUND", str(e))
             _emit(env)
@@ -2264,7 +2372,27 @@ def run_cmd(
     """Execute a multi-step YAML workflow.
 
     Runs a sequence of xl commands defined in a YAML file. The workflow
-    specifies a target workbook and a list of steps (plan, apply, verify, etc.).
+    specifies a target workbook and a list of steps.
+
+    Supported step commands:
+
+    Inspection: wb.inspect, sheet.ls, table.ls, cell.get, range.stat, query, formula.find, formula.lint
+
+    Mutation: table.add_column, table.append_rows, cell.set, formula.set, format.number, format.width, format.freeze, range.clear
+
+    Validation: validate.plan, validate.workbook, validate.refs, verify.assert
+
+    Other: apply, diff.compare
+
+    Example YAML workflow::
+
+        schema_version: "1.0"
+        name: pipeline
+        target: { file: data.xlsx }
+        steps:
+          - { id: inspect, run: wb.inspect }
+          - { id: add_col, run: table.add_column, args: { table: Sales, name: Margin, formula: "=[@Revenue]-[@Cost]" } }
+          - { id: check, run: verify.assert, args: { assertions: [{ type: table.column_exists, table: Sales, column: Margin }] } }
 
     Example: `xl run --workflow pipeline.yaml -f data.xlsx`
 
@@ -2322,7 +2450,20 @@ def serve_cmd(
 # Entrypoint (for `python -m xl`)
 # ---------------------------------------------------------------------------
 def main() -> None:
-    app()
+    try:
+        app()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        # Catch-all: any unhandled exception gets wrapped in a proper JSON
+        # error envelope so machine consumers never see raw tracebacks.
+        env = error_envelope(
+            "unknown",
+            "ERR_INTERNAL",
+            str(exc),
+        )
+        print_response(env)
+        raise SystemExit(90) from exc
 
 
 if __name__ == "__main__":

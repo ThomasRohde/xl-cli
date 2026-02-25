@@ -88,8 +88,16 @@ def validate_plan(ctx: WorkbookContext, plan: PatchPlan) -> ValidationResult:
                         "message": f"Table '{op.table}' not found for operation {op.op_id}",
                     })
                 else:
-                    _, tbl = result
+                    ws, tbl = result
                     col_names = {tc.name.casefold() for tc in tbl.tableColumns if tc.name}
+                    # Fallback: check header row when tableColumns is not populated
+                    if not col_names and tbl.ref:
+                        from xl.adapters.openpyxl_engine import _parse_ref
+                        hdr_min_row, hdr_min_col, _, hdr_max_col = _parse_ref(tbl.ref)
+                        for c in range(hdr_min_col, hdr_max_col + 1):
+                            v = ws.cell(row=hdr_min_row, column=c).value
+                            if v:
+                                col_names.add(str(v).casefold())
                     planned = planned_columns_by_table.setdefault(op.table, set())
                     new_name = (op.name or "").casefold()
                     if new_name in col_names or new_name in planned:

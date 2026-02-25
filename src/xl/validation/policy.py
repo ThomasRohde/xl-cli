@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 
 from xl.contracts.common import ErrorDetail, WarningDetail
+from xl.io.fileops import read_text_safe
 from xl.contracts.plans import PatchPlan
 
 
@@ -24,7 +25,7 @@ class Policy:
     @classmethod
     def load(cls, path: str | Path) -> "Policy":
         """Load policy from a YAML file."""
-        text = Path(path).read_text()
+        text = read_text_safe(path)
         data = yaml.safe_load(text) or {}
         return cls(data)
 

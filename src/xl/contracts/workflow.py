@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class WorkflowDefaults(BaseModel):
@@ -17,6 +17,18 @@ class WorkflowStep(BaseModel):
     id: str
     run: str
     args: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("run")
+    @classmethod
+    def validate_run_command(cls, v: str) -> str:
+        from xl.engine.workflow import WORKFLOW_COMMANDS
+
+        if v not in WORKFLOW_COMMANDS:
+            raise ValueError(
+                f"Unknown workflow step command: '{v}'. "
+                f"Supported: {', '.join(sorted(WORKFLOW_COMMANDS))}"
+            )
+        return v
 
 
 class WorkflowSpec(BaseModel):

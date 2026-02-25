@@ -110,7 +110,8 @@ def test_formula_set_table_column_skips_header(simple_workbook: Path):
     assert body_data["result"]["formula"] == "=[@Sales]-[@Cost]"
 
 
-def test_plan_validate_rejects_envelope_input(simple_workbook: Path, tmp_path: Path):
+def test_plan_validate_accepts_envelope_input(simple_workbook: Path, tmp_path: Path):
+    """Envelope files are auto-unwrapped: validate extracts .result as the plan body."""
     envelope_plan = tmp_path / "envelope_plan.json"
     gen = runner.invoke(
         app,
@@ -135,9 +136,8 @@ def test_plan_validate_rejects_envelope_input(simple_workbook: Path, tmp_path: P
         ["validate", "plan", "--file", str(simple_workbook), "--plan", str(envelope_plan)],
     )
     data = _json(validate.stdout)
-    assert validate.exit_code == 10
-    assert data["ok"] is False
-    assert data["errors"][0]["code"] == "ERR_PLAN_INVALID"
+    assert validate.exit_code == 0
+    assert data["ok"] is True
 
 
 def test_plan_append_writes_to_disk(simple_workbook: Path, tmp_path: Path):
@@ -383,3 +383,198 @@ def test_run_non_mutating_workflow_does_not_save(simple_workbook: Path, tmp_path
     assert result.exit_code == 0
     assert data["ok"] is True
     assert before == after
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: UTF-8 BOM tolerance
+# ---------------------------------------------------------------------------
+
+def test_load_plan_with_utf8_bom(simple_workbook: Path, sample_plan: dict, tmp_path: Path):
+    """Plan JSON files with a UTF-8 BOM should parse without error."""
+    plan_path = tmp_path / "bom_plan.json"
+    bom = b"\xef\xbb\xbf"
+    plan_path.write_bytes(bom + json.dumps(sample_plan).encode("utf-8"))
+
+    result = runner.invoke(
+        app,
+        ["validate", "plan", "--file", str(simple_workbook), "--plan", str(plan_path)],
+    )
+    data = _json(result.stdout)
+    assert data["ok"] is True
+
+
+def test_workflow_yaml_with_utf8_bom(simple_workbook: Path, tmp_path: Path):
+    """Workflow YAML files with a UTF-8 BOM should load correctly."""
+    workflow = {
+        "schema_version": "1.0",
+        "name": "bom_test",
+        "target": {"file": str(simple_workbook)},
+        "steps": [{"id": "s1", "run": "wb.inspect", "args": {}}],
+    }
+    wf_path = tmp_path / "bom_workflow.yaml"
+    bom = b"\xef\xbb\xbf"
+    wf_path.write_bytes(bom + yaml.safe_dump(workflow).encode("utf-8"))
+
+    result = runner.invoke(
+        app, ["run", "--workflow", str(wf_path), "--file", str(simple_workbook)]
+    )
+    data = _json(result.stdout)
+    assert data["ok"] is True
+
+
+def test_assertions_file_with_utf8_bom(simple_workbook: Path, tmp_path: Path):
+    """Assertions JSON files with a UTF-8 BOM should parse without error."""
+    assertions = [{"type": "table.column_exists", "table": "Sales", "column": "Region"}]
+    af = tmp_path / "bom_assertions.json"
+    bom = b"\xef\xbb\xbf"
+    af.write_bytes(bom + json.dumps(assertions).encode("utf-8"))
+
+    result = runner.invoke(
+        app,
+        ["verify", "assert", "--file", str(simple_workbook), "--assertions-file", str(af)],
+    )
+    data = _json(result.stdout)
+    assert data["ok"] is True
+
+
+def test_data_file_with_utf8_bom(simple_workbook: Path, tmp_path: Path):
+    """--data-file JSON with a UTF-8 BOM should parse without error."""
+    rows = [{"Region": "Central", "Product": "Widget", "Sales": 500, "Cost": 300}]
+    df = tmp_path / "bom_rows.json"
+    bom = b"\xef\xbb\xbf"
+    df.write_bytes(bom + json.dumps(rows).encode("utf-8"))
+
+    result = runner.invoke(
+        app,
+        [
+            "table", "append-rows",
+            "--file", str(simple_workbook),
+            "--table", "Sales",
+            "--data-file", str(df),
+        ],
+    )
+    data = _json(result.stdout)
+    assert data["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# Finding 5: WARN_UNCACHED_FORMULA on cell get --data-only
+# ---------------------------------------------------------------------------
+
+def test_cell_get_data_only_warns_on_uncached_formula(simple_workbook: Path):
+    """When --data-only returns null for a formula cell, a warning should appear."""
+    result = runner.invoke(
+        app,
+        ["cell", "get", "--file", str(simple_workbook), "--ref", "Summary!B1", "--data-only"],
+    )
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    # If the value is None (no cached value), we expect the warning
+    if data["result"]["value"] is None:
+        assert any(w["code"] == "WARN_UNCACHED_FORMULA" for w in data.get("warnings", []))
+
+
+# ---------------------------------------------------------------------------
+# Finding 6: diff compare --include-formulas
+# ---------------------------------------------------------------------------
+
+def test_diff_compare_include_formulas(simple_workbook: Path, tmp_path: Path):
+    """diff compare --include-formulas should report formula text changes."""
+    import shutil
+    import openpyxl as oxl
+
+    copy_path = tmp_path / "modified.xlsx"
+    shutil.copy2(simple_workbook, copy_path)
+    wb = oxl.load_workbook(str(copy_path))
+    wb["Summary"]["B1"] = "=SUM(Revenue!C2:C4)"  # changed range
+    wb.save(str(copy_path))
+    wb.close()
+
+    result = runner.invoke(
+        app,
+        [
+            "diff", "compare",
+            "--file-a", str(simple_workbook),
+            "--file-b", str(copy_path),
+            "--include-formulas",
+        ],
+    )
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    assert "formula_changes" in data["result"]
+    assert len(data["result"]["formula_changes"]) > 0
+    fc = data["result"]["formula_changes"][0]
+    assert fc["change_type"] == "formula_modified"
+
+
+# ---------------------------------------------------------------------------
+# Finding 3: Workflow dispatcher expansion
+# ---------------------------------------------------------------------------
+
+def test_workflow_query_step(simple_workbook: Path, tmp_path: Path):
+    """Workflow query step should execute SQL against tables."""
+    workflow = {
+        "schema_version": "1.0",
+        "name": "query_test",
+        "target": {"file": str(simple_workbook)},
+        "steps": [{"id": "q1", "run": "query", "args": {"sql": "SELECT COUNT(*) as cnt FROM Sales"}}],
+    }
+    wf_path = tmp_path / "workflow_query.yaml"
+    wf_path.write_text(yaml.safe_dump(workflow))
+
+    result = runner.invoke(app, ["run", "--workflow", str(wf_path), "--file", str(simple_workbook)])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    assert data["result"]["steps"][0]["ok"] is True
+    assert data["result"]["steps"][0]["result"]["row_count"] == 1
+
+
+def test_workflow_cell_get_step(simple_workbook: Path, tmp_path: Path):
+    """Workflow cell.get step should read a cell value."""
+    workflow = {
+        "schema_version": "1.0",
+        "name": "cell_get_test",
+        "target": {"file": str(simple_workbook)},
+        "steps": [{"id": "r1", "run": "cell.get", "args": {"ref": "Revenue!A2"}}],
+    }
+    wf_path = tmp_path / "workflow_cell_get.yaml"
+    wf_path.write_text(yaml.safe_dump(workflow))
+
+    result = runner.invoke(app, ["run", "--workflow", str(wf_path), "--file", str(simple_workbook)])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    assert data["result"]["steps"][0]["result"]["value"] == "North"
+
+
+def test_workflow_formula_find_step(simple_workbook: Path, tmp_path: Path):
+    """Workflow formula.find step should find formulas matching a pattern."""
+    workflow = {
+        "schema_version": "1.0",
+        "name": "ff_test",
+        "target": {"file": str(simple_workbook)},
+        "steps": [{"id": "f1", "run": "formula.find", "args": {"pattern": "SUM"}}],
+    }
+    wf_path = tmp_path / "workflow_ff.yaml"
+    wf_path.write_text(yaml.safe_dump(workflow))
+
+    result = runner.invoke(app, ["run", "--workflow", str(wf_path), "--file", str(simple_workbook)])
+    data = _json(result.stdout)
+    assert data["ok"] is True
+    assert data["result"]["steps"][0]["ok"] is True
+
+
+def test_workflow_invalid_step_rejected_at_parse_time(simple_workbook: Path, tmp_path: Path):
+    """Workflow with unknown step command should fail at parse time."""
+    workflow = {
+        "schema_version": "1.0",
+        "name": "bad_step",
+        "target": {"file": str(simple_workbook)},
+        "steps": [{"id": "s1", "run": "nonexistent.command", "args": {}}],
+    }
+    wf_path = tmp_path / "bad_step.yaml"
+    wf_path.write_text(yaml.safe_dump(workflow))
+
+    result = runner.invoke(app, ["run", "--workflow", str(wf_path), "--file", str(simple_workbook)])
+    data = _json(result.stdout)
+    assert data["ok"] is False
+    assert data["errors"][0]["code"] == "ERR_WORKFLOW_INVALID"

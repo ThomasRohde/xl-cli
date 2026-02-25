@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 from typing import Any
 
 from xl.engine.context import WorkbookContext
-from xl.engine.dispatcher import error_envelope, output_json, success_envelope
-from xl.contracts.common import Target
+
+
+# Commands that do not require a 'file' argument.
+_NO_FILE_COMMANDS = frozenset({"version", "guide", "close"})
+
+_SUPPORTED_COMMANDS = [
+    "version", "guide", "close",
+    "wb.inspect", "sheet.ls", "table.ls",
+    "cell.get", "cell.set", "query",
+    "formula.find", "formula.lint",
+    "range.stat",
+    "validate.workbook",
+    "diff.compare",
+]
 
 
 class StdioServer:
@@ -35,6 +46,22 @@ class StdioServer:
         args = request.get("args", {})
 
         try:
+            # -- Commands that do not require a file --
+            if command == "version":
+                import xl
+                return {"id": req_id, "ok": True, "result": {"version": xl.__version__}}
+
+            elif command == "guide":
+                return {"id": req_id, "ok": True, "result": {
+                    "supported_commands": _SUPPORTED_COMMANDS,
+                    "protocol": "JSON line-delimited over stdin/stdout",
+                }}
+
+            elif command == "close":
+                self._close_all()
+                return {"id": req_id, "ok": True, "result": "closed"}
+
+            # -- All remaining commands require a file --
             file = args.get("file", "")
             if not file:
                 return {"id": req_id, "ok": False, "error": "Missing 'file' in args"}
@@ -72,48 +99,48 @@ class StdioServer:
                 return {"id": req_id, "ok": True, "result": change.model_dump()}
 
             elif command == "query":
-                import duckdb
+                from xl.engine.workflow import _run_query
                 ctx = self._get_ctx(file, data_only=True)
                 sql = args.get("sql", "")
-                conn = duckdb.connect()
-                tables = ctx.list_tables()
-                for tbl in tables:
-                    ws = ctx.wb[tbl.sheet]
-                    from xl.adapters.openpyxl_engine import _parse_ref
-                    min_row, min_col, max_row, max_col = _parse_ref(tbl.ref)
-                    col_names = [tc.name for tc in tbl.columns]
-                    data_rows = []
-                    for row_idx in range(min_row + 1, max_row + 1):
-                        row_data = {}
-                        for ci, col_name in enumerate(col_names):
-                            cell = ws.cell(row=row_idx, column=min_col + ci)
-                            row_data[col_name] = cell.value
-                        data_rows.append(row_data)
-                    if data_rows:
-                        col_defs = []
-                        for col_name in col_names:
-                            sample = data_rows[0].get(col_name)
-                            if isinstance(sample, int):
-                                col_defs.append(f'"{col_name}" BIGINT')
-                            elif isinstance(sample, float):
-                                col_defs.append(f'"{col_name}" DOUBLE')
-                            else:
-                                col_defs.append(f'"{col_name}" VARCHAR')
-                        conn.execute(f'CREATE TABLE "{tbl.name}" ({", ".join(col_defs)})')
-                        placeholders = ", ".join(["?"] * len(col_names))
-                        insert_sql = f'INSERT INTO "{tbl.name}" VALUES ({placeholders})'
-                        rows_to_insert = [tuple(row_data.get(c) for c in col_names) for row_data in data_rows]
-                        conn.executemany(insert_sql, rows_to_insert)
-                cursor = conn.execute(sql)
-                columns = [desc[0] for desc in cursor.description]
-                raw_rows = cursor.fetchall()
-                rows = [dict(zip(columns, row)) for row in raw_rows]
-                conn.close()
-                return {"id": req_id, "ok": True, "result": {"columns": columns, "rows": rows, "row_count": len(rows)}}
+                result = _run_query(ctx, sql)
+                return {"id": req_id, "ok": True, "result": result}
 
-            elif command == "close":
-                self._close_all()
-                return {"id": req_id, "ok": True, "result": "closed"}
+            elif command == "formula.find":
+                ctx = self._get_ctx(file)
+                from xl.adapters.openpyxl_engine import formula_find
+                pattern = args.get("pattern", "")
+                sheet = args.get("sheet")
+                matches = formula_find(ctx, pattern, sheet_name=sheet)
+                return {"id": req_id, "ok": True, "result": matches}
+
+            elif command == "formula.lint":
+                ctx = self._get_ctx(file)
+                from xl.adapters.openpyxl_engine import formula_lint
+                sheet = args.get("sheet")
+                findings = formula_lint(ctx, sheet_name=sheet)
+                return {"id": req_id, "ok": True, "result": findings}
+
+            elif command == "range.stat":
+                ctx = self._get_ctx(file, data_only=args.get("data_only", False))
+                ref = args.get("ref", "")
+                sheet_name, range_ref = ref.split("!", 1) if "!" in ref else ("", ref)
+                from xl.adapters.openpyxl_engine import range_stat
+                result = range_stat(ctx, sheet_name, range_ref)
+                return {"id": req_id, "ok": True, "result": result}
+
+            elif command == "validate.workbook":
+                ctx = self._get_ctx(file)
+                from xl.validation.validators import validate_workbook
+                vr = validate_workbook(ctx)
+                return {"id": req_id, "ok": True, "result": vr.model_dump()}
+
+            elif command == "diff.compare":
+                from xl.diff.differ import diff_workbooks
+                file_a = args.get("file_a", file)
+                file_b = args.get("file_b", "")
+                sheet = args.get("sheet")
+                result = diff_workbooks(file_a, file_b, sheet_filter=sheet)
+                return {"id": req_id, "ok": True, "result": result}
 
             else:
                 return {"id": req_id, "ok": False, "error": f"Unknown command: {command}"}

@@ -62,3 +62,12 @@ def check_lock(path: str | Path) -> dict:
         return {"locked": True, "exists": True}
     except OSError:
         return {"locked": False, "exists": True, "check_error": True}
+
+
+def read_text_safe(path: str | Path) -> str:
+    """Read a text file with UTF-8 BOM tolerance.
+
+    Uses ``utf-8-sig`` encoding which silently strips a leading BOM when
+    present, while reading plain UTF-8 correctly.
+    """
+    return Path(path).read_text(encoding="utf-8-sig")

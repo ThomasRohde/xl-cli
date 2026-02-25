@@ -49,6 +49,14 @@ def table_add_column(
     ws, tbl = result
 
     existing_names = {tc.name.casefold() for tc in tbl.tableColumns if tc.name}
+    # Fallback: also check header row cells in case tableColumns is not yet
+    # populated (openpyxl only populates them after a save/reload roundtrip).
+    if not existing_names and tbl.ref:
+        hdr_min_row, hdr_min_col, _, hdr_max_col = _parse_ref(tbl.ref)
+        for c in range(hdr_min_col, hdr_max_col + 1):
+            v = ws.cell(row=hdr_min_row, column=c).value
+            if v:
+                existing_names.add(str(v).casefold())
     if column_name.casefold() in existing_names:
         raise ValueError(f"Column '{column_name}' already exists in table '{table_name}'")
 
@@ -236,7 +244,8 @@ def resolve_table_column_ref(
             col_letter = get_column_letter(col_idx)
             start_row = min_row if include_header else min_row + 1
             if start_row > max_row:
-                start_row = max_row
+                # No data rows exist — nothing to target.
+                return None
             return sheet_name, f"{col_letter}{start_row}:{col_letter}{max_row}"
     return None
 

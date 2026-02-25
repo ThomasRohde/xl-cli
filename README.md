@@ -227,6 +227,51 @@ xl table add-column --help      # Command detail with usage examples
 
 The `xl guide` command returns a comprehensive JSON document covering all commands, workflows, ref syntax, error codes, safety features, and complete multi-step examples — ideal for agent onboarding.
 
+### Token-optimized help (TOON)
+
+When an LLM is driving the CLI, verbose Rich-formatted `--help` output wastes tokens. Set `LLM=true` in the environment to switch all help output to **TOON** (Token-Oriented Object Notation) — a compact key:value format that reduces token usage by ~75% compared to the default Rich output.
+
+```bash
+# Enable TOON help for the session
+export LLM=true          # bash/zsh
+$env:LLM = "true"        # PowerShell
+
+xl --help
+```
+
+```
+name: xl
+version: 1.0.1
+description: Agent-first CLI for reading transforming and validating Excel workbooks
+options[2]:
+  flag,type,required,default,help
+  --version/-V,flag,false,false,Print version and exit.
+  --human,flag,false,false,Force human-readable help (overrides LLM=true).
+groups[11]:
+  name,description
+  cell,Read and write individual cell values.
+  table,Table operations — list add columns append rows.
+  ...
+commands[6]:
+  name,description
+  apply,Apply a patch plan to a workbook.
+  guide,Print the complete agent integration guide as structured JSON.
+  ...
+```
+
+The `--human` flag overrides `LLM=true` for a single invocation when you need the full Rich help:
+
+```bash
+xl --human --help         # Rich output even with LLM=true set
+xl --human table --help
+```
+
+| Condition | Help format |
+|---|---|
+| Default (no env var) | Rich/Markdown (human-readable) |
+| `LLM=true` | TOON (compact, token-optimized) |
+| `LLM=true` + `--human` | Rich/Markdown (override) |
+
 ### stdio server mode
 
 For tool-use integrations (MCP, ACP, or custom):
@@ -245,7 +290,7 @@ Reads JSON commands from stdin, writes JSON responses to stdout.
 # Install with dev dependencies
 uv sync
 
-# Run all tests (158 tests)
+# Run all tests
 uv run pytest tests/ -v
 
 # Run a specific test file
@@ -280,9 +325,10 @@ src/xl/
 ├── io/                     # Fingerprint, backup, atomic write, file locking
 ├── observe/                # Timer and event utilities
 ├── diff/                   # Workbook comparison logic
+├── help/                   # TOON help output for LLM consumers
 └── server/                 # stdio/HTTP server mode
 
-tests/                      # 158 tests: unit, integration, golden, property, performance
+tests/                      # Unit, integration, golden, property, performance tests
 ```
 
 ---

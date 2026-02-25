@@ -142,6 +142,15 @@ def execute_workflow(
 
     for step in workflow.steps:
         step_result: dict[str, Any] = {"step_id": step.id, "run": step.run}
+
+        # Check step-level dry-run
+        step_dry_run = workflow.defaults.dry_run or step.args.pop("dry_run", False) or step.args.pop("dry-run", False)
+        if step.run in _MUTATING_STEPS and step_dry_run:
+            step_result["ok"] = True
+            step_result["result"] = {"status": "skipped", "reason": "dry-run"}
+            results.append(step_result)
+            continue
+
         try:
             # -- Inspection / reading --
             if step.run == "wb.inspect":

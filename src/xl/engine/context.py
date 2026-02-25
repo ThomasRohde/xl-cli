@@ -8,7 +8,7 @@ import openpyxl
 from openpyxl.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from xl.contracts.common import Target
+from xl.contracts.common import Target, WorkbookCorruptError
 from xl.contracts.responses import (
     NamedRangeMeta,
     SheetMeta,
@@ -27,9 +27,12 @@ class WorkbookContext:
         if not self.path.exists():
             raise FileNotFoundError(f"Workbook not found: {self.path}")
         self.fp = fingerprint(self.path)
-        self.wb: Workbook = openpyxl.load_workbook(
-            str(self.path), data_only=data_only
-        )
+        try:
+            self.wb: Workbook = openpyxl.load_workbook(
+                str(self.path), data_only=data_only
+            )
+        except Exception as e:
+            raise WorkbookCorruptError(f"Cannot open workbook {self.path}: {e}") from e
 
     def target(self, **overrides: str | None) -> Target:
         t = Target(file=str(self.path))
@@ -89,6 +92,8 @@ class WorkbookContext:
         sheet_names = [sheet] if sheet else self.wb.sheetnames
         for sname in sheet_names:
             if sname not in self.wb.sheetnames:
+                if sheet:  # explicitly requested sheet doesn't exist
+                    raise ValueError(f"Sheet not found: {sname}")
                 continue
             ws: Worksheet = self.wb[sname]
             for tbl in ws._tables.values():

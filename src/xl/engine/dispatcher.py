@@ -39,6 +39,9 @@ VALIDATION_CODE_MARKERS = (
     "PATTERN_INVALID",
     "COLUMN_EXISTS",
     "WORKFLOW_INVALID",
+    "USAGE",
+    "TARGET_MISMATCH",
+    "SHEET_NOT_FOUND",
 )
 
 
@@ -110,7 +113,7 @@ def exit_code_for(envelope: ResponseEnvelope) -> int:
         return EXIT_CODES["unsupported"]
     if any(marker in code for marker in VALIDATION_CODE_MARKERS):
         return EXIT_CODES["validation"]
-    if code.startswith("ERR_IO") or "LOCK" in code or code.endswith("NOT_FOUND"):
+    if code.startswith("ERR_IO") or "LOCK" in code or code.endswith("NOT_FOUND") or "CORRUPT" in code:
         return EXIT_CODES["io"]
     if "RECALC" in code:
         return EXIT_CODES["recalc"]

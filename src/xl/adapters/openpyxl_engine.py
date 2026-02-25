@@ -120,11 +120,26 @@ def table_append_rows(
                 raise ValueError(f"Extra columns not in table schema: {extra}")
             if missing:
                 raise ValueError(f"Missing columns in row data: {missing}")
+        elif schema_mode == "allow-missing-null":
+            extra = set(row_data.keys()) - set(col_names)
+            if extra:
+                raise ValueError(f"Extra columns not in table schema: {extra}")
+        elif schema_mode == "map-by-header":
+            pass  # no validation — best-effort case-insensitive mapping below
+        else:
+            raise ValueError(f"Unknown schema_mode: {schema_mode}")
 
         max_row += 1
-        for col_idx, col_name in enumerate(col_names, start=min_col):
-            val = row_data.get(col_name)
-            ws.cell(row=max_row, column=col_idx, value=val)
+        if schema_mode == "map-by-header":
+            # Case-insensitive lookup
+            row_lower = {k.casefold(): v for k, v in row_data.items()}
+            for col_idx, col_name in enumerate(col_names, start=min_col):
+                val = row_lower.get(col_name.casefold())
+                ws.cell(row=max_row, column=col_idx, value=val)
+        else:
+            for col_idx, col_name in enumerate(col_names, start=min_col):
+                val = row_data.get(col_name)
+                ws.cell(row=max_row, column=col_idx, value=val)
 
     # Update table ref
     new_ref = f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
@@ -196,6 +211,10 @@ def format_number(
     ws = ctx.get_sheet(sheet_name)
     min_row, min_col, max_row, max_col = _parse_ref(ref)
 
+    _VALID_STYLES = frozenset({"number", "percent", "currency", "date", "text"})
+    if style not in _VALID_STYLES:
+        raise ValueError(f"Unknown format style '{style}'. Valid: {', '.join(sorted(_VALID_STYLES))}")
+
     fmt_map = {
         "number": f"#,##0.{'0' * decimals}",
         "percent": f"0.{'0' * decimals}%",
@@ -203,7 +222,7 @@ def format_number(
         "date": "YYYY-MM-DD",
         "text": "@",
     }
-    fmt = fmt_map.get(style, style)
+    fmt = fmt_map[style]
 
     cells_touched = 0
     for row in range(min_row, max_row + 1):

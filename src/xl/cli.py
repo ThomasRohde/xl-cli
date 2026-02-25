@@ -11,8 +11,14 @@ from typing import Annotated, Any, Optional
 
 import typer
 
+from xl.help import patch_typer_help
+from xl.help.custom_types import patch_typer_errors
+
+patch_typer_help()
+patch_typer_errors()
+
 import xl
-from xl.contracts.common import ChangeRecord, ErrorDetail, Target, WarningDetail
+from xl.contracts.common import ChangeRecord, ErrorDetail, Target, WarningDetail, WorkbookCorruptError
 from xl.contracts.plans import (
     Operation,
     PatchPlan,
@@ -311,6 +317,9 @@ def main(
     version: Annotated[
         bool, typer.Option("--version", "-V", help="Print version and exit.", is_eager=True)
     ] = False,
+    human: Annotated[
+        bool, typer.Option("--human", help="Force human-readable help (overrides LLM=true).", is_eager=True)
+    ] = False,
 ) -> None:
     if version:
         _version_callback(True)
@@ -333,6 +342,18 @@ def _load_ctx(file: str, *, data_only: bool = False):
 def _emit(envelope, code=None):
     print_response(envelope)
     raise typer.Exit(code if code is not None else exit_code_for(envelope))
+
+
+def _load_ctx_or_emit(file: str, cmd: str, *, data_only: bool = False):
+    """Load a WorkbookContext, or emit an error envelope and return None."""
+    try:
+        return _load_ctx(file, data_only=data_only)
+    except FileNotFoundError:
+        env = error_envelope(cmd, "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+        _emit(env)
+    except WorkbookCorruptError as e:
+        env = error_envelope(cmd, "ERR_WORKBOOK_CORRUPT", str(e), target=Target(file=file))
+        _emit(env)
 
 
 def _load_patch_plan(
@@ -510,6 +531,8 @@ def guide(
         },
         "error_codes": {
             "ERR_WORKBOOK_NOT_FOUND": "File does not exist (exit 50)",
+            "ERR_WORKBOOK_CORRUPT": "File cannot be parsed as a workbook (exit 50)",
+            "ERR_SHEET_NOT_FOUND": "Named sheet not found in workbook (exit 10)",
             "ERR_TABLE_NOT_FOUND": "Named table not found in workbook (exit 50)",
             "ERR_RANGE_INVALID": "Reference format is invalid or sheet not found (exit 10)",
             "ERR_PATTERN_INVALID": "Regex pattern is invalid (exit 10)",
@@ -528,6 +551,9 @@ def guide(
             "ERR_QUERY_FAILED": "SQL query execution failed (exit 90)",
             "ERR_OPERATION_FAILED": "Plan operation failed during apply (exit 90)",
             "ERR_PROTECTED_RANGE": "Range is protected by policy (exit 20)",
+            "ERR_PLAN_TARGET_MISMATCH": "Plan compose targets different workbooks (exit 10)",
+            "ERR_WORKFLOW_STEP_FAILED": "A workflow step failed during execution (exit 90)",
+            "ERR_USAGE": "CLI usage error — missing or invalid arguments (exit 10)",
         },
         "exit_codes": {
             "0": "Success",
@@ -609,13 +635,9 @@ def wb_inspect(
     See also: `xl sheet ls`, `xl table ls` for focused listing.
     """
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-            meta = ctx.get_workbook_meta()
-            ctx.close()
-        except FileNotFoundError:
-            env = error_envelope("wb.inspect", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
+        ctx = _load_ctx_or_emit(file, "wb.inspect")
+        meta = ctx.get_workbook_meta()
+        ctx.close()
 
     env = success_envelope(
         "wb.inspect",
@@ -643,13 +665,9 @@ def sheet_ls(
     Example: `xl sheet ls -f data.xlsx`
     """
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-            sheets = ctx.list_sheets()
-            ctx.close()
-        except FileNotFoundError:
-            env = error_envelope("sheet.ls", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
+        ctx = _load_ctx_or_emit(file, "sheet.ls")
+        sheets = ctx.list_sheets()
+        ctx.close()
 
     env = success_envelope(
         "sheet.ls",
@@ -679,13 +697,15 @@ def table_ls(
     Example: `xl table ls -f data.xlsx --sheet Revenue`
     """
     with Timer() as t:
+        ctx = _load_ctx_or_emit(file, "table.ls")
         try:
-            ctx = _load_ctx(file)
             tables = ctx.list_tables(sheet)
+        except ValueError as e:
             ctx.close()
-        except FileNotFoundError:
-            env = error_envelope("table.ls", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+            env = error_envelope("table.ls", "ERR_SHEET_NOT_FOUND", str(e), target=Target(file=file, sheet=sheet))
             _emit(env)
+            return
+        ctx.close()
 
     env = success_envelope(
         "table.ls",
@@ -727,11 +747,7 @@ def table_add_column_cmd(
     from xl.io.fileops import backup as make_backup
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-        except FileNotFoundError:
-            env = error_envelope("table.add_column", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
+        ctx = _load_ctx_or_emit(file, "table.add_column")
 
         try:
             change = table_add_column(ctx, table, name, formula=formula, default_value=default_value)
@@ -813,11 +829,7 @@ def table_append_rows_cmd(
         return  # unreachable due to _emit raising
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-        except FileNotFoundError:
-            env = error_envelope("table.append_rows", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
+        ctx = _load_ctx_or_emit(file, "table.append_rows")
 
         try:
             change = table_append_rows(ctx, table, rows, schema_mode=schema_mode)
@@ -895,11 +907,7 @@ def cell_set_cmd(
         parsed_value = value.lower() in ("true", "1", "yes")
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-        except FileNotFoundError:
-            env = error_envelope("cell.set", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
+        ctx = _load_ctx_or_emit(file, "cell.set")
 
         try:
             change = cell_set(ctx, sheet_name, cell_ref, parsed_value, cell_type=cell_type, force_overwrite_formulas=force_overwrite_formulas)
@@ -946,13 +954,9 @@ def validate_workbook_cmd(
     from xl.validation.validators import validate_workbook
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-            result = validate_workbook(ctx)
-            ctx.close()
-        except FileNotFoundError:
-            env = error_envelope("validate.workbook", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
+        ctx = _load_ctx_or_emit(file, "validate.workbook")
+        result = validate_workbook(ctx)
+        ctx.close()
 
     env = success_envelope(
         "validate.workbook",
@@ -991,13 +995,9 @@ def validate_plan_cmd(
         return
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-            result = validate_plan(ctx, plan)
-            ctx.close()
-        except FileNotFoundError:
-            env = error_envelope("validate.plan", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
+        ctx = _load_ctx_or_emit(file, "validate.plan")
+        result = validate_plan(ctx, plan)
+        ctx.close()
 
     env = success_envelope(
         "validate.plan",
@@ -1326,6 +1326,13 @@ def plan_compose(
         if not target_file:
             target_file = plan.target.file
             fp = plan.target.fingerprint
+        else:
+            if plan.target.fingerprint and fp and plan.target.fingerprint != fp:
+                env = error_envelope("plan.compose", "ERR_PLAN_TARGET_MISMATCH",
+                    f"Plan '{p}' targets a different workbook fingerprint than '{plans[0]}'",
+                    target=Target(file=target_file))
+                _emit(env)
+                return
         merged_ops.extend(plan.operations)
         merged_pre.extend(plan.preconditions)
         merged_post.extend(plan.postconditions)
@@ -1391,12 +1398,7 @@ def apply_cmd(
 
     with Timer() as t:
         # Load workbook
-        try:
-            ctx = _load_ctx(file)
-        except FileNotFoundError:
-            env = error_envelope("apply", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
-            return
+        ctx = _load_ctx_or_emit(file, "apply")
 
         fp_before = ctx.fp
 
@@ -1452,7 +1454,7 @@ def apply_cmd(
                         sheet_name, actual_ref = ref_str.split("!", 1)
 
                     if sheet_name:
-                        change = format_number(ctx, sheet_name, actual_ref, style=op.style or "number", decimals=op.decimals or 2)
+                        change = format_number(ctx, sheet_name, actual_ref, style=op.style or "number", decimals=op.decimals if op.decimals is not None else 2)
                         changes.append(change)
                 else:
                     changes.append(ChangeRecord(
@@ -1529,26 +1531,21 @@ def query_cmd(
     conn = None
     ctx = None
 
-    with Timer() as t:
-        try:
-            ctx = _load_ctx(file, data_only=True)
-        except FileNotFoundError:
-            env = error_envelope("query", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
+    # Build SQL if not provided directly (before the try block to avoid double-envelope)
+    if sql is None:
+        if table is None:
+            env = error_envelope("query", "ERR_MISSING_PARAM", "Provide --sql or --table", target=Target(file=file))
             _emit(env)
             return
+        cols = select if select else "*"
+        sql = f"SELECT {cols} FROM {table}"
+        if where:
+            sql += f" WHERE {where}"
+
+    with Timer() as t:
+        ctx = _load_ctx_or_emit(file, "query")
 
         try:
-            # Build SQL if not provided directly
-            if sql is None:
-                if table is None:
-                    env = error_envelope("query", "ERR_MISSING_PARAM", "Provide --sql or --table", target=Target(file=file))
-                    _emit(env)
-                    return
-                cols = select if select else "*"
-                sql = f"SELECT {cols} FROM {table}"
-                if where:
-                    sql += f" WHERE {where}"
-
             # Extract all tables to DuckDB
             conn = duckdb.connect()
             tables_found = ctx.list_tables()
@@ -1599,6 +1596,8 @@ def query_cmd(
             raw_rows = cursor.fetchall()
             rows = [dict(zip(columns, row)) for row in raw_rows]
             row_count = len(rows)
+        except (SystemExit, KeyboardInterrupt):
+            raise
         except Exception as e:
             env = error_envelope("query", "ERR_QUERY_FAILED", str(e), target=Target(file=file))
             _emit(env)
@@ -1651,12 +1650,7 @@ def cell_get_cmd(
     sheet_name, cell_ref = ref.split("!", 1)
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file, data_only=data_only)
-        except FileNotFoundError:
-            env = error_envelope("cell.get", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
-            return
+        ctx = _load_ctx_or_emit(file, "cell.get", data_only=data_only)
 
         try:
             result = cell_get(ctx, sheet_name, cell_ref)
@@ -1711,13 +1705,7 @@ def range_stat_cmd(
     sheet_name, range_ref = ref.split("!", 1)
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file, data_only=data_only)
-        except FileNotFoundError:
-            env = error_envelope("range.stat", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
-            return
-
+        ctx = _load_ctx_or_emit(file, "range.stat", data_only=data_only)
         result = range_stat(ctx, sheet_name, range_ref)
         ctx.close()
 
@@ -1768,13 +1756,7 @@ def range_clear_cmd(
         do_formats = False
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-        except FileNotFoundError:
-            env = error_envelope("range.clear", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
-            return
-
+        ctx = _load_ctx_or_emit(file, "range.clear")
         change = range_clear(ctx, sheet_name, range_ref, contents=do_contents, formats=do_formats)
 
         backup_path = None
@@ -1826,12 +1808,7 @@ def formula_set_cmd(
     from xl.adapters.openpyxl_engine import formula_set, resolve_table_column_ref
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-        except FileNotFoundError:
-            env = error_envelope("formula.set", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
-            return
+        ctx = _load_ctx_or_emit(file, "formula.set")
 
         # Resolve ref
         resolved = resolve_table_column_ref(ctx, ref, include_header=False)
@@ -1891,13 +1868,7 @@ def formula_lint_cmd(
     from xl.adapters.openpyxl_engine import formula_lint
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-        except FileNotFoundError:
-            env = error_envelope("formula.lint", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
-            return
-
+        ctx = _load_ctx_or_emit(file, "formula.lint")
         findings = formula_lint(ctx, sheet)
         ctx.close()
 
@@ -1930,12 +1901,7 @@ def formula_find_cmd(
     from xl.adapters.openpyxl_engine import formula_find
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-        except FileNotFoundError:
-            env = error_envelope("formula.find", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
-            return
+        ctx = _load_ctx_or_emit(file, "formula.find")
 
         try:
             matches = formula_find(ctx, pattern, sheet)
@@ -1987,12 +1953,7 @@ def format_number_cmd(
     from xl.adapters.openpyxl_engine import format_number, resolve_table_column_ref
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-        except FileNotFoundError:
-            env = error_envelope("format.number", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
-            return
+        ctx = _load_ctx_or_emit(file, "format.number")
 
         resolved = resolve_table_column_ref(ctx, ref)
         if resolved:
@@ -2005,7 +1966,13 @@ def format_number_cmd(
             _emit(env)
             return
 
-        change = format_number(ctx, sheet_name, cell_ref, style=style, decimals=decimals)
+        try:
+            change = format_number(ctx, sheet_name, cell_ref, style=style, decimals=decimals)
+        except ValueError as e:
+            ctx.close()
+            env = error_envelope("format.number", "ERR_INVALID_ARGUMENT", str(e), target=Target(file=file, ref=ref))
+            _emit(env)
+            return
 
         backup_path = None
         if not dry_run:
@@ -2073,13 +2040,7 @@ def format_width_cmd(
         return
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-        except FileNotFoundError:
-            env = error_envelope("format.width", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
-            return
-
+        ctx = _load_ctx_or_emit(file, "format.width")
         change = format_width(ctx, sheet, col_list, width)
 
         backup_path = None
@@ -2134,13 +2095,7 @@ def format_freeze_cmd(
         return
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-        except FileNotFoundError:
-            env = error_envelope("format.freeze", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
-            return
-
+        ctx = _load_ctx_or_emit(file, "format.freeze")
         change = format_freeze(ctx, sheet, freeze_ref)
 
         backup_path = None
@@ -2178,12 +2133,7 @@ def validate_refs_cmd(
     from xl.adapters.openpyxl_engine import _parse_ref
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-        except FileNotFoundError:
-            env = error_envelope("validate.refs", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
-            return
+        ctx = _load_ctx_or_emit(file, "validate.refs")
 
         checks: list[dict] = []
         if "!" in ref:
@@ -2293,13 +2243,7 @@ def verify_assert_cmd(
         return
 
     with Timer() as t:
-        try:
-            ctx = _load_ctx(file)
-        except FileNotFoundError:
-            env = error_envelope("verify.assert", "ERR_WORKBOOK_NOT_FOUND", f"File not found: {file}", target=Target(file=file))
-            _emit(env)
-            return
-
+        ctx = _load_ctx_or_emit(file, "verify.assert")
         results = run_assertions(ctx, assertion_list)
         ctx.close()
 
@@ -2424,6 +2368,12 @@ def run_cmd(
     env = success_envelope("run", result, target=Target(file=workbook_path), duration_ms=t.elapsed_ms)
     if not result.get("ok"):
         env.ok = False
+        for step in result.get("steps", []):
+            if not step.get("ok") and step.get("error"):
+                env.errors.append(ErrorDetail(
+                    code="ERR_WORKFLOW_STEP_FAILED",
+                    message=f"Step '{step['step_id']}' ({step['run']}): {step['error']}",
+                ))
     _emit(env)
 
 

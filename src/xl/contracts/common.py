@@ -7,6 +7,10 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class WorkbookCorruptError(Exception):
+    """Raised when a workbook file cannot be parsed."""
+
+
 class Target(BaseModel):
     """Identifies the target workbook/sheet/range for a command."""
 

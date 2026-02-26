@@ -13,7 +13,8 @@ Every command returns a JSON `ResponseEnvelope`:
   "changes": [],
   "warnings": [],
   "errors": [],
-  "metrics": { "duration_ms": 42 }
+  "metrics": { "duration_ms": 42 },
+  "recalc": { "mode": "cached", "performed": false }
 }
 ```
 
@@ -177,7 +178,7 @@ Returns a `DryRunSummary` with changes broken down by type and sheet.
 uv run xl apply -f data.xlsx --plan plan.json --backup
 ```
 
-`--backup` (on by default) creates a timestamped `.bak` copy before writing.
+`--backup` creates a timestamped `.bak` copy before writing. For `xl apply`, backup is **on by default** (`--backup/--no-backup`). For all other mutation commands, backup is **off by default** — pass `--backup` explicitly.
 
 ### Verify
 

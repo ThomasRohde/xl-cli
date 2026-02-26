@@ -7,7 +7,8 @@
       "Bash(uv run pytest tests/test_report_fixes.py::test_table_delete_success -v)",
       "Bash(head:*)",
       "Bash(cd /c/Users/thoma/Projects/xl-cli && uv run xl --help 2>&1)",
-      "Bash(cd /c/Users/thoma/Projects/xl-cli && uv run xl wb --help 2>&1)"
+      "Bash(cd /c/Users/thoma/Projects/xl-cli && uv run xl wb --help 2>&1)",
+      "Bash(grep -E \"\"\"--[a-z]|typer.Option\\\\\\(\" /c/Users/thoma/Projects/xl-cli/src/xl/cli.py)"
     ]
   }
 }

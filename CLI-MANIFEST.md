@@ -1,10 +1,20 @@
 # CLI-MANIFEST.md — Building Agent-First CLIs
 
-A design manifest for building CLIs that AI agents (and humans) can drive reliably.
+Most CLIs were designed for humans reading terminals. Agents need contracts, not prose.
 
-Tech-stack neutral. Implementation hints for Python, TypeScript, and Go where useful.
+If output shape changes between commands, errors are only natural language, or writes happen without preview and guardrails, agent automation becomes fragile and expensive.
 
-The manifest is layered. Each part builds on the previous. Pick the parts that match your CLI:
+This manifest defines a practical contract for agent-friendly CLIs:
+- one structured response envelope for every command
+- stable error and exit-code semantics
+- explicit read/write boundaries and safety controls
+- plan/validate/apply/verify workflows when risk is high
+
+It is stack-neutral, with implementation hints for Python, TypeScript, and Go.
+
+Use it incrementally:
+- Part I for every CLI
+- add Parts II-V as your CLI moves from read-only to mutating, transactional, and multi-agent use
 
 | Part | When to apply | Example CLIs |
 |------|--------------|-------------|
@@ -14,7 +24,7 @@ The manifest is layered. Each part builds on the previous. Pick the parts that m
 | IV. Transactional Workflows | CLIs where mutations are planned, reviewed, then applied | `terraform`, `flyway`, `alembic`, `helm upgrade` |
 | V. Multi-Agent Coordination | CLIs used by multiple agents or agents + humans concurrently | Shared file editors, database migration tools, deployment pipelines |
 
-A read-only query tool needs Parts I–II. A config editor needs I–III. A full infrastructure-as-code tool needs all five.
+A read-only query tool needs Parts I-II. A config editor needs I-III. A full infrastructure-as-code tool needs all five.
 
 ---
 
@@ -296,7 +306,7 @@ See also: myctl user list, myctl user inspect
 
 stdout is for structured data. Everything else is noise that burns tokens.
 
-Agents operate under a token budget. Every word your CLI prints to stdout that isn't part of the structured response is a word the agent must parse, discard, and pay for. In a monorepo build, a single command can dump 750+ tokens of package listings, update notifications, and banners before the actual result. That's context the agent loses for reasoning.
+This isn't just good for agents — it's good design, period. Humans shouldn't wade through garbage either. But agents make the cost concrete: every decorative line your CLI prints is a token the agent pays for and must discard. In a monorepo build, a single command can dump 750+ tokens of package listings, update notifications, and banners before the actual result. That's context the agent loses for reasoning.
 
 **Don't** — chatty output that buries the signal:
 
@@ -343,11 +353,65 @@ Building @app/core... done (1.2s)
 Building @app/api... done (0.8s)
 ```
 
+### Succeed quietly, fail loudly
+
+The classic Unix convention applies to structured envelopes too. On success, keep the response minimal — the agent needs the result, not congratulations. On failure, get rich: include the error code, a human message, structured details, and enough context that the agent can decide whether to retry, fix input, or escalate.
+
+```jsonc
+// Success — minimal, just the facts
+{ "ok": true, "result": { "id": "usr_123" } }
+
+// Failure — rich diagnostics
+{
+  "ok": false,
+  "errors": [{
+    "code": "ERR_VALIDATION_UNIQUE",
+    "message": "Email already registered",
+    "details": { "field": "email", "value": "ada@example.com", "existing_id": "usr_042" }
+  }]
+}
+```
+
+### Log sink for verbose operations
+
+For long-running commands (builds, migrations, test suites), write the full verbose output to a log file and return the path in the envelope. The agent reads the summary; it can selectively read the log file only if something goes wrong.
+
+```jsonc
+{
+  "ok": true,
+  "command": "test.run",
+  "result": { "passed": 142, "failed": 3, "skipped": 7 },
+  "log_file": "/tmp/myctl-test-20260226T143000Z.log"
+}
+```
+
+This avoids the trap where agents re-run expensive commands with different `grep` filters trying to find the one error in 2000 lines of build output.
+
+### Verbosity as progressive levels
+
+Provide a coherent verbosity system — not just a `--quiet` flag bolted on:
+
+| Flag | stdout | stderr |
+|------|--------|--------|
+| `--quiet` | Envelope only | Errors only |
+| *(default)* | Envelope only | Errors + warnings |
+| `--verbose` | Envelope (with extra diagnostics in `result`) | Full debug log |
+
+### `isatty()` as the zero-effort baseline
+
+Before any environment variable, check whether stdout is a terminal. If it's piped or redirected, you're probably being called by a script or agent — suppress color codes, spinners, and decorative output automatically. This has been Unix convention for decades and costs one function call.
+
+```python
+import sys
+if not sys.stdout.isatty():
+    # Suppress color, spinners, banners
+```
+
 **Rules:**
 - stdout is **exclusively** for the structured response (JSON). One object, no preamble, no epilog.
 - stderr is for progress, debug logs, banners, and diagnostics.
 - Never print update notifications, tips, or decorative output to stdout.
-- Suppress banners and color codes when stdout is not a TTY (`!isatty(1)`).
+- Check `isatty(1)` — if stdout isn't a terminal, suppress decoration automatically.
 
 ---
 
@@ -404,7 +468,16 @@ const llmMode = process.env.LLM === "true";
 llmMode := os.Getenv("LLM") == "true"
 ```
 
-If you already follow TOON (principle 7), `LLM=true` mostly confirms what your CLI should do by default. But it's a useful signal for CLIs that need to serve both humans (with rich, colorful output) and agents (with pure JSON).
+### Defense in depth, not a single dependency
+
+`LLM=true` is an emerging convention, not a standard. Some tool authors will ignore it. Some may never adopt it. Design your CLI in layers so it degrades gracefully:
+
+1. **`isatty()` check** — costs nothing, works everywhere, already convention. Suppresses color and decoration when piped.
+2. **TOON by default** — if your CLI follows principle 7, stdout is already clean JSON. `LLM=true` is a no-op.
+3. **`LLM=true`** — the extra signal for CLIs that serve both humans and agents. Switches the default output format, suppresses interactive prompts, and reduces stderr noise.
+4. **`--quiet` / `--output json`** — explicit flags as the final fallback. Always work, regardless of environment.
+
+If your CLI is agent-first by design (structured envelope on stdout, progress on stderr), `LLM=true` mostly confirms what you already do. It matters most for CLIs that default to human-readable output and need a signal to switch modes.
 
 ---
 

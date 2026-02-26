@@ -37,6 +37,7 @@ For quick single edits, use direct mutation commands with `--backup` — skip th
 
 ## Non-Obvious Rules
 
+- **NEVER run multiple mutations on the same file in parallel.** Every mutating command acquires an exclusive file lock — parallel calls to the same workbook will fail with `ERR_LOCK_HELD` (exit 50). Chain mutations sequentially with `&&` in a single shell command, or batch them into a YAML workflow with `xl run`.
 - **Always inspect before modifying.** Never modify a workbook blind — run `wb inspect` and `table ls` first to understand its structure.
 - **Prefer table operations over raw cell ops.** Tables are the primary data abstraction; use `table add-column`, `table append-rows`, etc.
 - **Use `--force-overwrite-formulas` to overwrite existing formulas.** The CLI blocks formula overwrites by default to prevent accidental destruction.
@@ -48,6 +49,41 @@ For quick single edits, use direct mutation commands with `--backup` — skip th
 - **`xl run` does not accept `--dry-run` as a CLI flag.** Use `defaults: dry_run: true` in the YAML workflow to preview all steps.
 - **Prefer `--data-file` over `--data` for `table append-rows`** when passing large payloads — avoids shell escaping issues.
 - **Use `--wait-lock` for concurrent/multi-agent access.** All mutating commands acquire an exclusive sidecar lock (`.xl.lock`). By default (`--wait-lock 0`), a locked file fails immediately with `ERR_LOCK_HELD`. Pass `--wait-lock 5` to retry for up to 5 seconds. Read-only commands are never blocked.
+
+## Concurrency: Sequential Mutations Required
+
+Mutating commands hold an exclusive `.xl.lock` file for the entire read-modify-write cycle. This means:
+
+**DO — chain mutations sequentially:**
+```bash
+xl cell set -f data.xlsx --ref "Sheet1!A1" --value "Name" && \
+xl cell set -f data.xlsx --ref "Sheet1!B1" --value "Value" && \
+xl cell set -f data.xlsx --ref "Sheet1!C1" --value "Total"
+```
+
+**DO — batch mutations in a YAML workflow (most efficient):**
+```yaml
+steps:
+  - id: set_a1
+    run: cell.set
+    args: { ref: "Sheet1!A1", value: "Name" }
+  - id: set_b1
+    run: cell.set
+    args: { ref: "Sheet1!B1", value: "Value" }
+  - id: set_c1
+    run: cell.set
+    args: { ref: "Sheet1!C1", value: "Total" }
+```
+
+**DON'T — run mutations in parallel (WILL FAIL):**
+```bash
+# These will fail with ERR_LOCK_HELD — do NOT run as parallel/sibling tool calls
+xl cell set -f data.xlsx --ref "Sheet1!A1" --value "Name" &
+xl cell set -f data.xlsx --ref "Sheet1!B1" --value "Value" &
+xl cell set -f data.xlsx --ref "Sheet1!C1" --value "Total" &
+```
+
+**Rule of thumb:** Read-only commands (`wb inspect`, `table ls`, `query`, `cell get`, etc.) can run in parallel freely. Mutations to the **same file** must always be sequential. Mutations to **different files** can run in parallel.
 
 ## Command Discovery
 

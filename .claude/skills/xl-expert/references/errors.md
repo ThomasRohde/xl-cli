@@ -88,6 +88,13 @@ When a plan's fingerprint doesn't match the current workbook:
 
 ## Troubleshooting Guide
 
+**`ERR_LOCK_HELD` / "File is locked by another process" from parallel tool calls:**
+- **Most common cause:** Multiple `xl` mutation commands were launched in parallel (e.g., as sibling tool calls or background `&` processes) against the same file. Each mutation acquires an exclusive `.xl.lock` — only one can run at a time.
+- **Fix:** Chain mutations to the same file sequentially with `&&` in a single shell command: `xl cell set ... && xl cell set ... && xl cell set ...`
+- **Better fix:** Batch multiple mutations into a YAML workflow and run with `xl run --workflow pipeline.yaml`
+- **Multi-agent fix:** If separate agents must write to the same file, use `--wait-lock 5` so the second agent retries for up to 5 seconds instead of failing immediately.
+- Read-only commands (`wb inspect`, `table ls`, `query`, `cell get`, etc.) are never blocked and can always run in parallel.
+
 **"File not found" but the file exists:**
 - Check the path is correct (use absolute path if unsure)
 - On Windows, check file is not open in Excel (which locks it)

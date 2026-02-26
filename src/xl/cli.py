@@ -64,6 +64,8 @@ Agent-first CLI for reading, transforming, and validating Excel workbooks (.xlsx
 - Fingerprint-based conflict detection prevents stale overwrites
 - `--wait-lock` exclusive file locking prevents concurrent mutations
 
+**Concurrency:** Mutating commands acquire an exclusive `.xl.lock` — never run multiple mutations on the same file in parallel. Chain with `&&` or use `xl run` with a YAML workflow.
+
 **Exit codes:** 0=success, 10=validation, 20=protection, 30=formula, 40=conflict, 50=io, 60=recalc, 70=unsupported, 90=internal
 
 Run `xl guide` for a comprehensive machine-readable orientation.
@@ -114,6 +116,7 @@ _TABLE_EPILOG = """\
 
 **Table column refs** use structured references: `TableName[ColumnName]` (usable in formula and format commands).
 Prefer table-level operations over raw cell manipulation when data is in Excel tables.
+**Concurrency:** Multiple table mutations on the same file must be chained with `&&`, not run in parallel.
 """
 
 _CELL_EPILOG = """\
@@ -127,6 +130,7 @@ _CELL_EPILOG = """\
 
 **Ref format:** always include the sheet name — `SheetName!CellRef` (e.g. `Sheet1!B2`).
 **Formula protection:** setting a cell that contains a formula requires `--force-overwrite-formulas`.
+**Concurrency:** Multiple `cell set` calls on the same file must be chained with `&&`, not run in parallel.
 """
 
 _RANGE_EPILOG = """\
@@ -682,6 +686,17 @@ def guide(
             "locking": "Mutating commands acquire an exclusive sidecar lock (.xl.lock) to prevent concurrent modifications. Use --wait-lock <seconds> to wait instead of failing immediately when locked.",
             "formula_protection": "cell set and formula set refuse to overwrite formulas unless --force-overwrite-formulas is used",
             "policy": "An optional xl-policy.yaml can restrict protected sheets, ranges, and mutation thresholds",
+        },
+        "concurrency": {
+            "critical_rule": "NEVER run multiple mutating commands on the same file in parallel. They will fail with ERR_LOCK_HELD (exit 50).",
+            "why": "Every mutating command acquires an exclusive .xl.lock sidecar file for the entire read-modify-write cycle. Only one process can hold it at a time.",
+            "correct_patterns": [
+                "Chain mutations sequentially with &&: xl cell set -f f.xlsx --ref 'S!A1' --value X && xl cell set -f f.xlsx --ref 'S!B1' --value Y",
+                "Batch mutations in a YAML workflow: xl run --workflow pipeline.yaml (most efficient for 3+ operations)",
+                "Use --wait-lock N for multi-agent access: xl cell set -f f.xlsx --ref 'S!A1' --value X --wait-lock 5",
+            ],
+            "wrong_pattern": "Running xl cell set ... & xl cell set ... & (parallel background processes or parallel tool calls targeting the same file)",
+            "parallel_safe": "Read-only commands (wb inspect, table ls, query, cell get, range stat, etc.) are never blocked and can run in parallel freely. Mutations to DIFFERENT files can also run in parallel.",
         },
         "examples": [
             {

@@ -2,14 +2,16 @@
 
 ## Create a Workbook From Scratch With Data and Formatting
 
+**IMPORTANT:** All mutations to the same file must be chained sequentially with `&&`. Never run them as parallel/sibling tool calls — they will fail with `ERR_LOCK_HELD`.
+
 ```bash
 # 1. Create the workbook with named sheets
 uv run xl wb create --file report.xlsx --sheets "Sales,Summary"
 
-# 2. Set up headers
-uv run xl cell set -f report.xlsx --ref "Sales!A1" --value "Region"
-uv run xl cell set -f report.xlsx --ref "Sales!B1" --value "Product"
-uv run xl cell set -f report.xlsx --ref "Sales!C1" --value "Revenue"
+# 2. Set up headers (chain with && — same file, must be sequential)
+uv run xl cell set -f report.xlsx --ref "Sales!A1" --value "Region" && \
+uv run xl cell set -f report.xlsx --ref "Sales!B1" --value "Product" && \
+uv run xl cell set -f report.xlsx --ref "Sales!C1" --value "Revenue" && \
 uv run xl cell set -f report.xlsx --ref "Sales!D1" --value "Cost"
 
 # 3. Promote the range to an Excel Table
@@ -26,13 +28,13 @@ uv run xl table append-rows -f report.xlsx -t SalesData --data '[
 uv run xl table add-column -f report.xlsx -t SalesData -n Margin \
   --formula "=[@Revenue]-[@Cost]"
 
-# 6. Format the currency columns
-uv run xl format number -f report.xlsx --ref "SalesData[Revenue]" --style currency --decimals 2
-uv run xl format number -f report.xlsx --ref "SalesData[Cost]" --style currency --decimals 2
+# 6. Format the currency columns (chain with && — same file)
+uv run xl format number -f report.xlsx --ref "SalesData[Revenue]" --style currency --decimals 2 && \
+uv run xl format number -f report.xlsx --ref "SalesData[Cost]" --style currency --decimals 2 && \
 uv run xl format number -f report.xlsx --ref "SalesData[Margin]" --style currency --decimals 2
 
-# 7. Set column widths and freeze header row
-uv run xl format width -f report.xlsx --sheet Sales --columns A,B,C,D,E --width 15
+# 7. Set column widths and freeze header row (chain with &&)
+uv run xl format width -f report.xlsx --sheet Sales --columns A,B,C,D,E --width 15 && \
 uv run xl format freeze -f report.xlsx --sheet Sales --ref "A2"
 
 # 8. Verify the result
@@ -106,7 +108,43 @@ uv run xl run --workflow pipeline.yaml -f budget.xlsx
 uv run xl validate workflow --workflow pipeline.yaml   # syntax check without workbook
 ```
 
-## Multi-Agent / Concurrent Access
+## Concurrency and Sequential Mutations
+
+### Critical: Never Parallelize Mutations to the Same File
+
+Every mutating command acquires an exclusive `.xl.lock` sidecar file. Parallel mutations to the same workbook **will fail** with `ERR_LOCK_HELD` (exit 50). This is the #1 cause of errors for AI agents using `xl`.
+
+**Always chain mutations to the same file with `&&`:**
+```bash
+# CORRECT — sequential via &&
+uv run xl cell set -f data.xlsx --ref "Sheet1!A1" --value "Name" && \
+uv run xl cell set -f data.xlsx --ref "Sheet1!B1" --value "Value" && \
+uv run xl table create -f data.xlsx -s Sheet1 --ref "A1:B1" -t MyTable
+```
+
+**Or batch them in a YAML workflow (most efficient for 3+ operations):**
+```yaml
+schema_version: "1.0"
+name: "setup-headers"
+target:
+  file: "data.xlsx"
+steps:
+  - id: set_a1
+    run: cell.set
+    args: { ref: "Sheet1!A1", value: "Name" }
+  - id: set_b1
+    run: cell.set
+    args: { ref: "Sheet1!B1", value: "Value" }
+  - id: create_table
+    run: table.create
+    args: { sheet: Sheet1, ref: "A1:B1", table: MyTable }
+```
+
+**What you CAN parallelize:**
+- Read-only commands against the same file (never blocked)
+- Mutations targeting **different** files (separate locks)
+
+### Multi-Agent / Concurrent Access
 
 When multiple agents or processes may mutate the same workbook simultaneously, use `--wait-lock` to serialize access:
 

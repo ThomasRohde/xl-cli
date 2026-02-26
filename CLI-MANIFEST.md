@@ -50,6 +50,29 @@ The single most important rule. **Every command — success or failure — retur
 }
 ```
 
+### Minimum contract (strict)
+
+Define a small set of envelope invariants so agents can trust every response shape:
+
+- `schema_version`, `request_id`, `ok`, `command`, `result`, `errors`, `warnings`, and `metrics` are always present.
+- `errors` and `warnings` are always arrays (possibly empty), never omitted.
+- `result` is always present; on failure use `null`, not missing keys.
+- `command` is the canonical dotted command ID, regardless of user-facing aliases.
+- `request_id` is unique per invocation and should also appear in stderr diagnostics for correlation.
+
+```jsonc
+{
+  "schema_version": "1.0",
+  "request_id": "req_20260226_143000_7f3a",
+  "ok": false,
+  "command": "user.create",
+  "result": null,
+  "warnings": [],
+  "errors": [{ "code": "ERR_VALIDATION_REQUIRED", "message": "Missing email" }],
+  "metrics": { "duration_ms": 8 }
+}
+```
+
 **Don't** — different shapes for success vs. error, or mixing text with data:
 
 ```
@@ -103,6 +126,27 @@ Errors carry a **code** (for machines) and a **message** (for humans). Agents br
   ]
 }
 ```
+
+### Include retry semantics in every error
+
+Agents need to know whether they should retry, wait, fix input, or escalate. Include retry hints directly in the error object:
+
+```jsonc
+{
+  "code": "ERR_IO_CONNECTION",
+  "message": "Can't connect to localhost:5432",
+  "retryable": true,
+  "retry_after_ms": 1000,
+  "suggested_action": "retry",
+  "details": { "host": "localhost", "port": 5432 }
+}
+```
+
+Suggested `suggested_action` values:
+- `retry` (same input, maybe with backoff)
+- `fix_input` (validation issue)
+- `reauth` (credential refresh needed)
+- `escalate` (internal bug or policy block)
 
 **Taxonomy example:**
 
@@ -207,6 +251,30 @@ Scale the guide to your CLI's complexity. A simple read-only tool might just lis
   "error_codes": { "ERR_RESOURCE_NOT_FOUND": { "exit_code": 10, "retryable": false } }
 }
 ```
+
+### Publish command schemas and compatibility policy
+
+The guide should include machine-usable schemas for command inputs and envelopes, plus compatibility guarantees:
+
+```jsonc
+{
+  "schema_version": "1.0",
+  "compatibility": {
+    "additive_changes": "minor",
+    "breaking_changes": "major"
+  },
+  "commands": {
+    "user.create": {
+      "input_schema": { "$ref": "#/$defs/UserCreateInput" },
+      "output_schema": { "$ref": "#/$defs/EnvelopeUserCreateResult" }
+    }
+  }
+}
+```
+
+Compatibility rule of thumb:
+- Add optional fields and new error codes freely (non-breaking).
+- Never rename/remove required fields, error codes, or semantic meanings without a major schema bump.
 
 **Don't** — force agents to discover your CLI by trial and error:
 
@@ -399,13 +467,27 @@ Provide a coherent verbosity system — not just a `--quiet` flag bolted on:
 
 ### `isatty()` as the zero-effort baseline
 
-Before any environment variable, check whether stdout is a terminal. If it's piped or redirected, you're probably being called by a script or agent — suppress color codes, spinners, and decorative output automatically. This has been Unix convention for decades and costs one function call.
+Before any environment variable, check whether stdout is a terminal. If it's piped or redirected, you're probably being called by a script or agent — suppress color codes, spinners, and decorative output automatically. This has been convention for decades, works cross-platform, and costs one function call.
 
 ```python
+# Python — works on Linux, macOS, Windows
 import sys
 if not sys.stdout.isatty():
     # Suppress color, spinners, banners
 ```
+
+```typescript
+// TypeScript — process.stdout.isTTY is undefined when piped
+if (!process.stdout.isTTY) { /* suppress decoration */ }
+```
+
+```go
+// Go — use golang.org/x/term for cross-platform support
+import "golang.org/x/term"
+if !term.IsTerminal(int(os.Stdout.Fd())) { /* suppress decoration */ }
+```
+
+**Windows note:** `isatty()` works in CMD, PowerShell, and Windows Terminal. In MinTTY (Git Bash) it returns `false` even for interactive sessions because MinTTY uses pipes rather than console handles. This false negative is safe — it suppresses decoration, not data. If you need to detect MinTTY specifically, check for the `TERM_PROGRAM=mintty` environment variable.
 
 **Rules:**
 - stdout is **exclusively** for the structured response (JSON). One object, no preamble, no epilog.
@@ -478,6 +560,21 @@ llmMode := os.Getenv("LLM") == "true"
 4. **`--quiet` / `--output json`** — explicit flags as the final fallback. Always work, regardless of environment.
 
 If your CLI is agent-first by design (structured envelope on stdout, progress on stderr), `LLM=true` mostly confirms what you already do. It matters most for CLIs that default to human-readable output and need a signal to switch modes.
+
+### Precedence rules and non-interactive auth
+
+Define output-mode precedence so behavior is deterministic:
+
+1. Explicit CLI flags (`--output`, `--quiet`, `--verbose`) take highest precedence.
+2. Environment variables (`LLM=true`, `NO_COLOR=1`, `CI=true`) are next.
+3. `isatty()` defaults apply when neither flags nor env vars are set.
+
+For authentication in agent mode, use a non-interactive contract:
+
+- Never open browser/device-code prompts when stdin/stdout is non-interactive or `LLM=true`.
+- Return structured auth errors (`ERR_AUTH_REQUIRED`, `ERR_AUTH_EXPIRED`) with `details.methods` describing supported auth methods.
+- Document credential source precedence (for example: `--token` > `MYCTL_TOKEN` > config file > OS keychain).
+- Provide an explicit `auth inspect` or `auth status` command so agents can diagnose auth state without trial-and-error writes.
 
 ---
 
@@ -601,6 +698,18 @@ An agent must now parse whitespace-aligned columns, understand "PK" means primar
 ```
 
 Expose enough structure that an agent can compose a valid write command from inspect output alone — column names, types, constraints, relationships, counts.
+
+### Deterministic read semantics
+
+Read commands should be deterministic so agents can cache, diff, and paginate reliably:
+
+- Stable default ordering (for example, by primary key or canonical name).
+- Cursor pagination (`next_cursor`) instead of offset-only pagination for mutable datasets.
+- UTC timestamps in RFC 3339 / ISO-8601 format.
+- Locale-independent number/date formatting in structured fields.
+- Explicit `sort_by`, `sort_order`, `page_size`, and `cursor` parameters in the guide schema.
+
+If you expose hashes/fingerprints in read output, define exactly what bytes are hashed so two clients produce the same fingerprint.
 
 ---
 
@@ -772,6 +881,30 @@ Never write directly to the target file. Write to a temp file, fsync, then atomi
 **Why it matters:** A crash mid-write leaves the original file intact. Without atomic writes, agents can corrupt data and not know it.
 
 This applies to file-backed CLIs. For API-backed CLIs, the equivalent is using database transactions or conditional writes (ETags, optimistic locking).
+
+### Safe retries with idempotency keys
+
+Mutating commands should accept an idempotency key so agents can safely retry after timeouts or transport failures:
+
+```bash
+myctl user create --name "Ada Lovelace" --email ada@example.com --idempotency-key req-8f9d
+```
+
+```jsonc
+{
+  "ok": true,
+  "command": "user.create",
+  "request_id": "req_20260226_143000_7f3a",
+  "result": { "user_id": "usr_123" },
+  "idempotency": { "key": "req-8f9d", "status": "replayed" }
+}
+```
+
+Rules:
+
+- Same key + same mutation payload returns the original result (or a typed conflict if payload differs).
+- Keys should have a documented retention window (for example, 24 hours).
+- Include idempotency status (`new` or `replayed`) in the envelope for traceability.
 
 ---
 
@@ -1006,6 +1139,18 @@ Pick the parts that match your CLI. Each part includes the ones above it.
 |---|-----------|-----------|
 | 22 | Resource locking | Serialize concurrent writes |
 | 23 | Concurrency docs | Tell agents what's safe to parallelize |
+
+### Production Hardening Add-ons
+
+| Add-on | One-liner |
+|---|---|
+| Strict envelope invariants | Required keys + nullability + `request_id` on every response |
+| Retry semantics in errors | Add `retryable`, `retry_after_ms`, and `suggested_action` |
+| Deterministic reads | Stable sort, cursor pagination, UTC timestamps, locale-neutral fields |
+| Non-interactive auth contract | Never block on browser prompts; return structured auth errors |
+| Schema publication policy | Include per-command input/output schemas and compatibility guarantees |
+| Idempotency keys for writes | Safe retries after network or process failures |
+| Output precedence rules | `flags > env vars > isatty()` defaults |
 
 ---
 

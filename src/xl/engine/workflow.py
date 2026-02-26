@@ -699,6 +699,8 @@ def execute_workflow(
             step_result["error"] = str(e)
 
         results.append(step_result)
+        if not step_result.get("ok", False) and workflow.defaults.stop_on_error:
+            break
 
     # Save if not dry_run
     if not workflow.defaults.dry_run and mutated:

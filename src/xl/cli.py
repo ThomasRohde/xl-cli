@@ -75,7 +75,7 @@ _WB_EPILOG = """\
 
 `xl wb lock-status -f data.xlsx`  — check if another process holds a lock
 
-The **fingerprint** (xxhash of file contents) is used by patch plans for conflict detection.
+The **fingerprint** (SHA-256 of file contents) is used by patch plans for conflict detection.
 Use `xl wb inspect` as the first step to understand any workbook.
 """
 
@@ -889,15 +889,18 @@ def sheet_delete_cmd(
         backup_path = None
         if not dry_run:
             if backup:
+                from xl.io.fileops import backup as make_backup
                 backup_path = make_backup(file)
             ctx.save(file)
         ctx.close()
 
+    warnings = change.warnings if change.warnings else []
     result = {"dry_run": dry_run, "backup_path": backup_path, "sheet": name}
     env = success_envelope(
         "sheet.delete", result,
         target=Target(file=file, sheet=name),
         changes=[change],
+        warnings=warnings,
         duration_ms=t.elapsed_ms,
     )
     _emit(env)
@@ -1261,6 +1264,7 @@ def table_delete_cmd(
         backup_path = None
         if not dry_run:
             if backup:
+                from xl.io.fileops import backup as make_backup
                 backup_path = make_backup(file)
             ctx.save(file)
         ctx.close()
@@ -1316,6 +1320,7 @@ def table_delete_column_cmd(
         backup_path = None
         if not dry_run:
             if backup:
+                from xl.io.fileops import backup as make_backup
                 backup_path = make_backup(file)
             ctx.save(file)
         ctx.close()
@@ -3128,7 +3133,7 @@ def verify_assert_cmd(
     Checks that the workbook matches expected conditions after mutations.
     Returns `ok: false` if any assertion fails.
 
-    **Assertion types:** `table.column_exists`, `cell.value_equals`, `cell.not_empty`,
+    **Assertion types:** `table.exists`, `table.column_exists`, `cell.value_equals`, `cell.not_empty`,
     `cell.value_type`, `table.row_count`, `table.row_count.gte` (alias: `row_count.gte`).
 
     Example: `xl verify assert -f data.xlsx --assertions '[{"type":"table.column_exists","table":"Sales","column":"Margin"}]'`

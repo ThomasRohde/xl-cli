@@ -39,7 +39,7 @@ def test_command_help_toon():
 
 def test_no_llm_normal_help():
     """Without LLM=true, help should be normal Rich output."""
-    result = runner.invoke(app, ["--help"])
+    result = runner.invoke(app, ["--help"], env={"LLM": ""})
     assert result.exit_code == 0
     out = result.stdout
     assert "Usage:" in out or "Usage" in out.lower()

@@ -772,14 +772,25 @@ def sheet_delete(
             f"Cannot delete sheet '{sheet_name}': workbook must retain at least one sheet"
         )
     ws = ctx.wb[sheet_name]
+
+    # Check for tables on the sheet
+    table_names = [t.displayName for t in ws._tables.values()]
+    warnings = []
+    if table_names:
+        warnings.append(WarningDetail(
+            code="WARN_TABLES_ON_SHEET",
+            message=f"Sheet '{sheet_name}' contains {len(table_names)} table(s) that will be destroyed: {', '.join(table_names)}",
+        ))
+
     used_range = ws.dimensions if ws.dimensions else None
     ctx.wb.remove(ws)
     return ChangeRecord(
         type="sheet.delete",
         target=sheet_name,
-        before={"sheet": sheet_name, "used_range": used_range},
+        before={"sheet": sheet_name, "used_range": used_range, "tables": table_names},
         after=None,
-        impact={"sheets": 1},
+        impact={"sheets": 1, "tables": len(table_names)},
+        warnings=warnings,
     )
 
 

@@ -11,6 +11,7 @@ class WorkflowDefaults(BaseModel):
     output: str = "json"
     recalc: str = "cached"
     dry_run: bool = False
+    stop_on_error: bool = False
 
 
 class WorkflowStep(BaseModel):

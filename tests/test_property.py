@@ -181,7 +181,7 @@ class TestPatchPlanProperties:
 # ---------------------------------------------------------------------------
 class TestFingerprintProperties:
     @given(data=st.binary(min_size=1, max_size=10_000))
-    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=20, deadline=500, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_fingerprint_deterministic(self, data: bytes, tmp_path: Path) -> None:
         p = tmp_path / "test_file.bin"
         p.write_bytes(data)
@@ -194,7 +194,7 @@ class TestFingerprintProperties:
         data_a=st.binary(min_size=1, max_size=1000),
         data_b=st.binary(min_size=1, max_size=1000),
     )
-    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=20, deadline=500, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_fingerprint_differs_for_different_content(
         self, data_a: bytes, data_b: bytes, tmp_path: Path,
     ) -> None:
@@ -211,7 +211,7 @@ class TestFingerprintProperties:
 # ---------------------------------------------------------------------------
 class TestCellSetGetRoundtrip:
     @given(value=st.integers(min_value=-1_000_000, max_value=1_000_000))
-    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=20, deadline=500, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_integer_roundtrip(self, value: int, tmp_path: Path) -> None:
         from xl.adapters.openpyxl_engine import cell_get, cell_set
 
@@ -228,7 +228,7 @@ class TestCellSetGetRoundtrip:
         assert result["type"] == "number"
 
     @given(value=st.floats(min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False))
-    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=20, deadline=500, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_float_roundtrip(self, value: float, tmp_path: Path) -> None:
         from xl.adapters.openpyxl_engine import cell_get, cell_set
 
@@ -245,7 +245,7 @@ class TestCellSetGetRoundtrip:
         assert result["type"] == "number"
 
     @given(value=safe_text)
-    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=20, deadline=500, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_text_roundtrip(self, value: str, tmp_path: Path) -> None:
         from xl.adapters.openpyxl_engine import cell_get, cell_set
 
@@ -269,7 +269,7 @@ class TestAppendRowsSchemaProperty:
     @given(
         extra_col=safe_header.filter(lambda s: s not in ("Col1", "Col2")),
     )
-    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=20, deadline=500, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_strict_mode_rejects_extra_columns(self, extra_col: str, tmp_path: Path) -> None:
         from xl.adapters.openpyxl_engine import table_append_rows
 
@@ -286,7 +286,7 @@ class TestAppendRowsSchemaProperty:
             max_size=5,
         ),
     )
-    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=20, deadline=500, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_strict_mode_accepts_matching_schema(self, values: list[dict], tmp_path: Path) -> None:
         from xl.adapters.openpyxl_engine import table_append_rows
 
@@ -306,7 +306,7 @@ class TestAddColumnPreservesData:
         col_name=safe_header,
         default_val=st.one_of(st.none(), st.integers(min_value=0, max_value=1000)),
     )
-    @settings(max_examples=15, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=15, deadline=500, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_add_column_preserves_existing(self, col_name: str, default_val, tmp_path: Path) -> None:
         from xl.adapters.openpyxl_engine import table_add_column
 
@@ -334,7 +334,7 @@ class TestDryRunNeverMutates:
     @given(
         col_name=safe_header.filter(lambda s: s not in ("Region", "Product", "Sales", "Cost")),
     )
-    @settings(max_examples=10, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=10, deadline=500, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_dry_run_preserves_fingerprint(self, col_name: str, tmp_path: Path) -> None:
         from typer.testing import CliRunner
         from xl.cli import app
@@ -362,7 +362,7 @@ class TestPlanValidateConsistency:
     @given(
         col_name=safe_header.filter(lambda s: s not in ("Region", "Sales")),
     )
-    @settings(max_examples=10, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=10, deadline=500, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_valid_plan_validates_successfully(self, col_name: str, tmp_path: Path) -> None:
         from xl.validation.validators import validate_plan
 

@@ -1369,3 +1369,98 @@ def test_plan_delete_column(simple_workbook: Path):
     op = data["result"]["operations"][0]
     assert op["type"] == "table.delete_column"
     assert op["column"] == "Region"
+
+
+# ---------------------------------------------------------------------------
+# v1.4.0 REPORT.md fixes
+# ---------------------------------------------------------------------------
+
+
+def test_sheet_delete_backup(simple_workbook: Path):
+    """BUG-1: sheet delete --backup should not crash with NameError."""
+    result = runner.invoke(app, [
+        "sheet", "delete", "--file", str(simple_workbook),
+        "--name", "Summary", "--backup",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+    assert data["result"]["backup_path"] is not None
+    assert Path(data["result"]["backup_path"]).exists()
+
+
+def test_table_delete_backup(simple_workbook: Path):
+    """BUG-1: table delete --backup should not crash with NameError."""
+    result = runner.invoke(app, [
+        "table", "delete", "--file", str(simple_workbook),
+        "--table", "Sales", "--backup",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+    assert data["result"]["backup_path"] is not None
+    assert Path(data["result"]["backup_path"]).exists()
+
+
+def test_table_delete_column_backup(simple_workbook: Path):
+    """BUG-1: table delete-column --backup should not crash with NameError."""
+    result = runner.invoke(app, [
+        "table", "delete-column", "--file", str(simple_workbook),
+        "--table", "Sales", "--name", "Region", "--backup",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+    assert data["result"]["backup_path"] is not None
+    assert Path(data["result"]["backup_path"]).exists()
+
+
+def test_sheet_delete_warns_about_tables(simple_workbook: Path):
+    """BUG-3: deleting a sheet with tables should return WARN_TABLES_ON_SHEET."""
+    result = runner.invoke(app, [
+        "sheet", "delete", "--file", str(simple_workbook),
+        "--name", "Revenue",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+    assert len(data["warnings"]) >= 1
+    warn = data["warnings"][0]
+    assert warn["code"] == "WARN_TABLES_ON_SHEET"
+    assert "Sales" in warn["message"]
+
+
+def test_sheet_delete_no_warning_without_tables(simple_workbook: Path):
+    """Deleting a table-free sheet should produce no warnings."""
+    result = runner.invoke(app, [
+        "sheet", "delete", "--file", str(simple_workbook),
+        "--name", "Summary",
+    ])
+    data = _json(result.stdout)
+    assert result.exit_code == 0
+    assert data["ok"] is True
+    assert data["warnings"] == []
+
+
+def test_workflow_stop_on_error(simple_workbook: Path, tmp_path: Path):
+    """stop_on_error: true should halt workflow after first failing step."""
+    workflow = {
+        "schema_version": "1.0",
+        "name": "stop_test",
+        "target": {"file": str(simple_workbook)},
+        "defaults": {"stop_on_error": True},
+        "steps": [
+            {"id": "s1", "run": "cell.get", "args": {"ref": "NonExistent!Z99"}},
+            {"id": "s2", "run": "cell.get", "args": {"ref": "Revenue!A2"}},
+        ],
+    }
+    wf_path = tmp_path / "workflow_stop.yaml"
+    wf_path.write_text(yaml.safe_dump(workflow))
+
+    result = runner.invoke(app, ["run", "--workflow", str(wf_path), "--file", str(simple_workbook)])
+    data = _json(result.stdout)
+    assert data["ok"] is False
+    # Only one step should have executed — the second should be skipped
+    assert data["result"]["steps_total"] == 2
+    assert len(data["result"]["steps"]) == 1
+    assert data["result"]["steps"][0]["ok"] is False

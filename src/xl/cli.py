@@ -12,7 +12,7 @@ from typing import Annotated, Any, Optional
 import typer
 
 from xl.help import patch_typer_help
-from xl.help.custom_types import patch_typer_errors
+from xl.help.custom_types import patch_typer_errors, should_use_toon
 
 patch_typer_help()
 patch_typer_errors()
@@ -252,7 +252,11 @@ Useful for reviewing changes after `xl apply`.
 
 def _version_callback(value: bool) -> None:
     if value:
-        typer.echo(xl.__version__)
+        if should_use_toon():
+            env = success_envelope("version", {"version": xl.__version__})
+            print_response(env)
+        else:
+            typer.echo(xl.__version__)
         raise typer.Exit()
 
 

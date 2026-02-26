@@ -61,7 +61,7 @@ _COMMANDS: list[tuple[list[str], str]] = [
 
 def _get_outputs(args: list[str]) -> tuple[str, str]:
     """Return (rich_output, toon_output) for a command."""
-    rich = runner.invoke(app, args, env={"LLM": ""})
+    rich = runner.invoke(app, args, env={"LLM": "false"})
     toon = runner.invoke(app, args, env={"LLM": "true"})
     assert rich.exit_code == 0, f"Rich help failed for {args}: {rich.output}"
     assert toon.exit_code == 0, f"TOON help failed for {args}: {toon.output}"

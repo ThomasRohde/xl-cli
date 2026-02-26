@@ -18,15 +18,29 @@ def _human_flag_set(ctx: click.Context | None) -> bool:
 
 
 def should_use_toon(ctx: click.Context | None = None) -> bool:
-    """Check if TOON help output should be used."""
-    if os.environ.get("LLM", "").lower() != "true":
-        return False
-    # Check both sys.argv (real CLI) and Click context (CliRunner)
+    """Check if TOON help output should be used.
+
+    Precedence:
+    1. --human flag → always human
+    2. LLM=true/1  → always TOON
+    3. LLM=false/0 → always human (explicit opt-out, overrides isatty)
+    4. LLM unset   → not sys.stdout.isatty() (piped/redirected → TOON)
+    """
+    # 1. --human overrides everything
     if "--human" in sys.argv:
         return False
     if ctx is not None and _human_flag_set(ctx):
         return False
-    return True
+
+    # 2-3. Explicit LLM env var
+    llm_val = os.environ.get("LLM", "").strip().lower()
+    if llm_val in ("true", "1"):
+        return True
+    if llm_val in ("false", "0"):
+        return False
+
+    # 4. Heuristic: piped/redirected → TOON
+    return not sys.stdout.isatty()
 
 
 def patch_typer_help() -> None:

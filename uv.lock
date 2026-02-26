@@ -488,7 +488,7 @@ wheels = [
 ]
 
 [[package]]
-name = "xl-agent-cli"
+name = "xl-cli"
 version = "1.5.0"
 source = { editable = "." }
 dependencies = [

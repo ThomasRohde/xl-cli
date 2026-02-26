@@ -1,33 +1,46 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+    paths: [pyproject.toml]
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build distribution
+  check-version:
+    name: Check for version change
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+      changed: ${{ steps.check.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Build package
-        run: uv build
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist/
+          fetch-depth: 2
+
+      - name: Extract current version
+        id: extract
+        run: |
+          version=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check if version changed
+        id: check
+        run: |
+          prev=$(git show HEAD~1:pyproject.toml 2>/dev/null | grep -m1 '^version' | sed 's/.*"\(.*\)"/\1/' || echo "")
+          curr=${{ steps.extract.outputs.version }}
+          if [ "$prev" != "$curr" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
 
   test:
     name: Run tests
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,19 +54,28 @@ jobs:
       - name: Run tests
         run: uv run pytest tests/ -v
 
-  publish:
-    name: Publish to PyPI
-    needs: [build, test]
+  release:
+    name: Create release and publish
+    needs: [check-version, test]
+    if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      contents: write
       id-token: write
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Build package
+        run: uv build
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v${{ needs.check-version.outputs.version }}" dist/* --title "v${{ needs.check-version.outputs.version }}" --generate-notes
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

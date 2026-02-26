@@ -73,7 +73,7 @@ Requires **Python 3.12+** and [uv](https://docs.astral.sh/uv/).
 ### From PyPI (recommended)
 
 ```bash
-uv tool install xl-cli
+uv tool install xl-agent-cli
 
 # Verify
 xl version

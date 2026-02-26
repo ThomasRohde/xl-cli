@@ -80,6 +80,12 @@ xl version
 xl --help
 ```
 
+### One-shot with uvx
+
+```bash
+uvx --from xl-agent-cli xl --help
+```
+
 ### Local development install
 
 ```bash

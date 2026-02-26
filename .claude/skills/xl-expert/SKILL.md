@@ -32,6 +32,8 @@ For quick single edits, use direct mutation commands with `--backup` — skip th
 | Automate a repeatable pipeline | YAML workflow with `xl run` |
 | Compare before/after states | `xl diff compare` |
 | Analyze data with SQL | `xl query --sql "..."` |
+| Check if Excel has a file locked | `xl wb lock-status` (check before mutations on Windows) |
+| Agent tool integration (MCP/ACP) | `xl serve --stdio` (JSON over stdin/stdout) |
 
 ## Non-Obvious Rules
 
@@ -42,6 +44,9 @@ For quick single edits, use direct mutation commands with `--backup` — skip th
 - **Plans carry fingerprints.** If the workbook changes externally after plan creation, apply rejects with exit code 40. Re-inspect and regenerate the plan.
 - **Structured references use `[@ColumnName]` syntax** inside table formulas: `"=[@Revenue]-[@Cost]"`.
 - **Cell/range refs require the sheet name:** `Sheet1!B2`, `Sheet1!A1:D10`. Table column refs use `TableName[Column]`.
+- **`--where` queries on formula columns return raw formula text** in programmatically-created workbooks (no cached values). Use `--sql` with inline computation instead: `SELECT *, (Revenue - Cost) AS Margin FROM Sales WHERE Revenue > 10000`.
+- **`xl run` does not accept `--dry-run` as a CLI flag.** Use `defaults: dry_run: true` in the YAML workflow to preview all steps.
+- **Prefer `--data-file` over `--data` for `table append-rows`** when passing large payloads — avoids shell escaping issues.
 
 ## Command Discovery
 

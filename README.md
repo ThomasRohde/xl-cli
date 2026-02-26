@@ -20,7 +20,7 @@ xl verify assert -f budget.xlsx \     # confirm expected state
    --assertions '[{"type":"table.column_exists","table":"Sales","column":"Margin"}]'
 ```
 
-Every command returns a structured **JSON envelope** — no parsing of human-readable text required:
+Every command returns a structured **JSON envelope**:
 
 ```json
 {
@@ -33,19 +33,21 @@ Every command returns a structured **JSON envelope** — no parsing of human-rea
 }
 ```
 
+No Excel installation required — works entirely with openpyxl.
+
 ---
 
 ## Features
 
-- **Inspect** — discover sheets, tables, named ranges, fingerprints, and lock status
-- **Read** — get cell values, range statistics (min/max/mean/sum/count/stddev), search formulas
+- **Inspect** — sheets, tables, named ranges, fingerprints, lock status
+- **Read** — cell values, range statistics (min/max/mean/sum/count/stddev), formula search by regex
 - **Query** — SQL over table data via DuckDB (`SELECT Region, SUM(Sales) FROM Sales GROUP BY Region`)
-- **Mutate** — add columns, append rows, set cells/formulas, apply number formats, set column widths, freeze panes
+- **Mutate** — add/delete columns, append rows, set cells/formulas, number formats, column widths, freeze panes
 - **Patch plans** — generate JSON plans, compose multi-step plans, validate before applying
 - **Apply** — execute plans with `--dry-run` preview and `--backup` safety copy
-- **Verify** — post-apply assertions (`table.column_exists`, `cell.value_equals`, `row_count.gte`, etc.)
+- **Verify** — post-apply assertions (`table.column_exists`, `cell.value_equals`, `row_count.gte`, ...)
 - **Diff** — cell-level comparison between two workbook files
-- **Lint** — detect volatile functions, broken references, and formula anti-patterns
+- **Lint** — detect volatile functions, broken references, formula anti-patterns
 - **Workflows** — multi-step YAML pipelines with `xl run`
 - **Server mode** — stdio JSON server for agent tool integration (MCP/ACP)
 
@@ -58,8 +60,8 @@ All mutating commands include built-in protections:
 | `--dry-run` | Preview every change without writing to disk |
 | `--backup` | Timestamped `.bak` copy before any write |
 | Fingerprint conflict detection | Plans record the file's xxhash; apply rejects if the workbook changed since the plan was created |
-| Formula protection | Refuses to overwrite existing formulas unless `--force-overwrite-formulas` is explicitly set |
-| Policy files | Optional `xl-policy.yaml` to restrict protected sheets, ranges, and mutation thresholds |
+| Formula protection | Refuses to overwrite existing formulas unless `--force-overwrite-formulas` is set |
+| Policy files | Optional `xl-policy.yaml` for protected sheets, ranges, mutation thresholds, and command restrictions |
 
 ---
 
@@ -67,10 +69,19 @@ All mutating commands include built-in protections:
 
 Requires **Python 3.12+** and [uv](https://docs.astral.sh/uv/).
 
-### Local repo install (development)
+### From PyPI (recommended)
 
 ```bash
-# Clone and install
+uv tool install xl-agent-cli
+
+# Verify
+xl version
+xl --help
+```
+
+### Local development install
+
+```bash
 git clone https://github.com/ThomasRohde/xl-cli.git
 cd xl-cli
 uv sync
@@ -80,24 +91,15 @@ uv run xl version
 uv run xl --help
 ```
 
-No Excel installation required — works entirely with openpyxl.
-
-### Global install on your PC
-
-Install `xl` as a global user tool so you can run it from any folder:
+### Global install from source
 
 ```bash
-# Clone once, then install globally from this repo
 git clone https://github.com/ThomasRohde/xl-cli.git
 cd xl-cli
 uv tool install --from . xl-agent-cli
-
-# Verify
-xl version
-xl --help
 ```
 
-If `xl` is not found right away, open a new terminal so your PATH refreshes.
+If `xl` is not found, open a new terminal so your PATH refreshes.
 
 ---
 
@@ -166,7 +168,7 @@ xl diff compare --file-a original.xlsx --file-b modified.xlsx
 
 | Group | Commands | Description |
 |---|---|---|
-| `xl wb` | `inspect`, `lock-status` | Workbook metadata, fingerprint, lock status |
+| `xl wb` | `inspect`, `create`, `lock-status` | Workbook metadata, creation, fingerprint, lock check |
 | `xl sheet` | `ls`, `create`, `delete`, `rename` | Sheet lifecycle and management |
 | `xl table` | `create`, `ls`, `add-column`, `append-rows`, `delete`, `delete-column` | Table operations |
 | `xl cell` | `get`, `set` | Read/write individual cells |
@@ -175,7 +177,7 @@ xl diff compare --file-a original.xlsx --file-b modified.xlsx
 | `xl format` | `number`, `width`, `freeze` | Number formats, column widths, freeze panes |
 | `xl query` | _(top-level)_ | SQL queries over table data via DuckDB |
 | `xl plan` | `show`, `add-column`, `create-table`, `set-cells`, `format`, `compose`, `delete-sheet`, `rename-sheet`, `delete-table`, `delete-column` | Generate and compose patch plans |
-| `xl validate` | `workbook`, `plan`, `refs`, `workflow` | Validate health, plans, references, and workflows |
+| `xl validate` | `workbook`, `plan`, `refs`, `workflow` | Validate health, plans, references, workflows |
 | `xl apply` | _(top-level)_ | Apply patch plans with `--dry-run` and `--backup` |
 | `xl verify` | `assert` | Post-apply assertions |
 | `xl diff` | `compare` | Cell-level workbook comparison |
@@ -183,7 +185,7 @@ xl diff compare --file-a original.xlsx --file-b modified.xlsx
 | `xl serve` | _(top-level)_ | stdio server for agent tool integration |
 | `xl guide` | _(top-level)_ | Machine-readable JSON orientation guide |
 
-Use `xl <group> --help` or `xl <group> <command> --help` for detailed usage with examples.
+Use `xl <group> --help` or `xl <group> <command> --help` for detailed usage.
 
 ---
 
@@ -210,6 +212,8 @@ Commands that target cells, ranges, or table columns use **ref syntax**:
 | `30` | Formula error (overwrite blocked, parse failure) |
 | `40` | Conflict (fingerprint mismatch — workbook changed) |
 | `50` | IO error (file not found, locked, permission denied) |
+| `60` | Recalculation error |
+| `70` | Unsupported operation |
 | `90` | Internal error |
 
 ---
@@ -219,20 +223,18 @@ Commands that target cells, ranges, or table columns use **ref syntax**:
 `xl` is designed to be driven by AI coding agents. Every command returns machine-parseable JSON, uses deterministic exit codes, and provides progressive discovery:
 
 ```bash
-xl guide                        # Full structured JSON orientation (start here)
-xl --help                       # Command group overview
-xl table --help                 # Group detail with examples
-xl table add-column --help      # Command detail with usage examples
+xl guide                        # full structured JSON orientation (start here)
+xl --help                       # command group overview
+xl table --help                 # group detail with examples
+xl table add-column --help      # command detail with usage examples
 ```
-
-The `xl guide` command returns a comprehensive JSON document covering all commands, workflows, ref syntax, error codes, safety features, and complete multi-step examples — ideal for agent onboarding.
 
 ### Token-optimized help (TOON)
 
-When an LLM is driving the CLI, verbose Rich-formatted `--help` output wastes tokens. Set `LLM=true` in the environment to switch all help output to **TOON** (Token-Oriented Object Notation) — a compact key:value format that reduces token usage by ~75% compared to the default Rich output.
+When an LLM drives the CLI, verbose Rich-formatted `--help` output wastes tokens. Set `LLM=true` to switch all help to **TOON** (Token-Oriented Object Notation) — a compact key:value format that cuts token usage by ~75%.
 
 ```bash
-# Enable TOON help for the session
+# Enable TOON for the session
 export LLM=true          # bash/zsh
 $env:LLM = "true"        # PowerShell
 
@@ -241,7 +243,6 @@ xl --help
 
 ```
 name: xl
-version: 1.0.1
 description: Agent-first CLI for reading transforming and validating Excel workbooks
 options[2]:
   flag,type,required,default,help
@@ -252,18 +253,12 @@ groups[11]:
   cell,Read and write individual cell values.
   table,Table operations — list add columns append rows.
   ...
-commands[6]:
-  name,description
-  apply,Apply a patch plan to a workbook.
-  guide,Print the complete agent integration guide as structured JSON.
-  ...
 ```
 
-The `--human` flag overrides `LLM=true` for a single invocation when you need the full Rich help:
+The `--human` flag overrides `LLM=true` for a single invocation:
 
 ```bash
 xl --human --help         # Rich output even with LLM=true set
-xl --human table --help
 ```
 
 | Condition | Help format |
@@ -309,6 +304,9 @@ uv run xl --help
 | Data models | [Pydantic v2](https://docs.pydantic.dev/) |
 | JSON serialization | [orjson](https://github.com/ijl/orjson) |
 | SQL queries | [DuckDB](https://duckdb.org/) |
+| Terminal output | [Rich](https://github.com/Textualize/rich) |
+| YAML parsing | [PyYAML](https://pyyaml.org/) |
+| Structured logging | [structlog](https://www.structlog.org/) |
 | File locking | [portalocker](https://github.com/WoLpH/portalocker) |
 | Fingerprinting | [xxhash](https://github.com/ifduyue/python-xxhash) |
 | Build | [hatchling](https://hatch.pypa.io/) |
@@ -318,15 +316,15 @@ uv run xl --help
 ```
 src/xl/
 ├── cli.py                  # Typer CLI app, all command definitions
-├── contracts/              # Pydantic models (ResponseEnvelope, PatchPlan, etc.)
-├── engine/                 # WorkbookContext, response dispatcher
-├── adapters/               # openpyxl engine, DuckDB queries, recalc adapters
-├── validation/             # Plan and workbook validators
+├── contracts/              # Pydantic models (ResponseEnvelope, PatchPlan, WorkflowSpec)
+├── engine/                 # WorkbookContext, response dispatcher, verify, workflow runner
+├── adapters/               # openpyxl engine, DuckDB queries
+├── validation/             # Plan/workbook validators, policy engine
 ├── io/                     # Fingerprint, backup, atomic write, file locking
 ├── observe/                # Timer and event utilities
 ├── diff/                   # Workbook comparison logic
 ├── help/                   # TOON help output for LLM consumers
-└── server/                 # stdio/HTTP server mode
+└── server/                 # stdio server mode
 
 tests/                      # Unit, integration, golden, property, performance tests
 ```

@@ -62,6 +62,12 @@ uv run xl formula lint -f data.xlsx
 
 # Compare two workbooks cell-by-cell
 uv run xl diff compare --file-a original.xlsx --file-b modified.xlsx
+
+# Check if a workbook is locked by another process (useful before mutations on Windows)
+uv run xl wb lock-status -f data.xlsx
+
+# Validate cell/range references within a workbook
+uv run xl validate refs -f data.xlsx --ref "Sheet1!A1:D10"
 ```
 
 ## Table Operations
@@ -80,6 +86,9 @@ uv run xl table add-column -f data.xlsx -t Sales -n Status --default "Active"
 
 # Append rows (JSON array of objects keyed by column name)
 uv run xl table append-rows -f data.xlsx -t Sales --data '[{"Region":"West","Product":"Widget","Revenue":5000,"Cost":3000}]'
+
+# Append rows from a JSON file (avoids shell escaping issues — preferred for large payloads)
+uv run xl table append-rows -f data.xlsx -t Sales --data-file rows.json --schema-mode allow-missing-null
 
 # Delete a column
 uv run xl table delete-column -f data.xlsx -t Sales -n OldColumn
@@ -148,6 +157,22 @@ uv run xl plan set-cells -f data.xlsx \
 
 uv run xl plan create-table -f data.xlsx -s Sheet1 \
   --ref "A1:D10" -t Sales --out plan.json
+
+# Plan: format a range
+uv run xl plan format -f data.xlsx --ref "Sales[Revenue]" \
+  --style currency --decimals 2 --out plan.json
+
+# Plan: delete a column
+uv run xl plan delete-column -f data.xlsx -t Sales -n OldColumn --out plan.json
+
+# Plan: delete a table
+uv run xl plan delete-table -f data.xlsx -t ObsoleteTable --out plan.json
+
+# Plan: rename a sheet
+uv run xl plan rename-sheet -f data.xlsx --name "OldName" --new-name "NewName" --out plan.json
+
+# Plan: delete a sheet
+uv run xl plan delete-sheet -f data.xlsx --name "Obsolete" --out plan.json
 ```
 
 ### Compose Multiple Plans

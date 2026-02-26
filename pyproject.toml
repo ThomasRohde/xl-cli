@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xl-agent-cli"
-version = "1.4.1"
+version = "1.4.3"
 description = "Agent-first CLI for Excel workbooks"
 requires-python = ">=3.12"
 license = "MIT"

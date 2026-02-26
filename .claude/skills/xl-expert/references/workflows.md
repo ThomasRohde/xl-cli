@@ -125,7 +125,11 @@ steps:
 ```bash
 # Syntax-only check (no workbook needed)
 uv run xl validate workflow --workflow pipeline.yaml
+```
 
-# Full validation against workbook
-uv run xl run --workflow pipeline.yaml -f data.xlsx --dry-run
+**Note:** `xl run` does **not** accept a `--dry-run` CLI flag. To preview all steps without writing changes, set `dry_run: true` in the workflow's `defaults` block:
+
+```yaml
+defaults:
+  dry_run: true
 ```

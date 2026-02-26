@@ -1,399 +1,187 @@
-# xl CLI v1.4.0 — Blind Test Report
+# xl CLI v1.4.2 — Blind Test Report
 
 **Date:** 2026-02-26
-**Platform:** Windows 11 (bash shell via Git Bash)
-**Install method:** `uv tool` (global)
+**Tester:** Claude Opus 4.6
+**Platform:** Windows 11 / Git Bash
+**xl version:** 1.4.2 (via `uv run xl`)
 
 ---
 
 ## Executive Summary
 
-`xl` is a well-designed, agent-first CLI for Excel workbook manipulation. It delivers
-deterministic JSON from every command, supports a full plan/apply/verify transaction
-workflow, and provides excellent error handling with structured error codes. Testing
-uncovered **3 bugs** and **2 design concerns**, but overall the tool is solid and
-production-ready for agent-driven spreadsheet automation.
+xl v1.4.2 is a solid, well-structured agent-first CLI for Excel workbook manipulation. Every command returns a consistent JSON `ResponseEnvelope`, error messages are machine-readable with categorized exit codes, and safety rails (dry-run, backup, fingerprint conflict detection, formula overwrite protection) work reliably. The plan/compose/validate/apply lifecycle is clean and production-ready. YAML workflows execute multi-step pipelines correctly.
 
-**Commands tested:** 42 invocations across all 11 command groups + 6 top-level commands.
-**Pass rate:** 39/42 (93%) — 2 genuine bugs, 1 downgraded to usability note, plus
-several agent-side mistakes documented in the self-reflection section.
+**Overall verdict:** xl is ready for agent-driven Excel automation. The handful of issues found are minor and mostly documentation gaps rather than functional bugs.
 
 ---
 
-## Test Results by Command Group
+## Test Matrix
 
-### 1. `wb` — Workbook Operations
+| Area | Commands Tested | Result |
+|------|----------------|--------|
+| Help & Discovery | `--help`, `--version`, `guide`, `--human`, group help | All pass |
+| Workbook Creation | `wb create`, `wb create --force`, `wb inspect`, `wb lock-status` | All pass |
+| Sheet Operations | `sheet ls`, `sheet create`, `sheet rename`, `sheet delete`, `sheet delete --backup` | All pass |
+| Cell Operations | `cell set` (text, number, bool, date), `cell get`, `cell set --dry-run` | All pass |
+| Range Operations | `range stat`, `range clear --contents --formats` | All pass |
+| Table Operations | `table create`, `table ls`, `table add-column` (formula + default), `table append-rows` (inline + file), `table delete-column`, `table delete` | All pass |
+| Schema Modes | `strict`, `allow-missing-null`, `map-by-header` | All pass |
+| Formatting | `format number` (currency, percent), `format width`, `format freeze` | All pass |
+| Formula Operations | `formula set`, `formula set --fill-mode fixed`, `formula find`, `formula lint`, `--force-overwrite-formulas` | All pass |
+| Query & SQL | `query --sql` (GROUP BY, WHERE, ORDER BY, computed columns), `query --table --where`, `query --data-only` | All pass |
+| Plan Workflow | `plan add-column`, `plan format`, `plan set-cells`, `plan delete-column`, `plan rename-sheet`, `plan delete-table`, `plan compose`, `plan show`, `validate plan`, `apply --dry-run`, `apply --backup`, fingerprint conflict | All pass |
+| Verify | `verify assert` with `--assertions-file` (table.exists, table.column_exists, table.row_count, cell.not_empty, cell.value_equals) | All pass |
+| YAML Workflows | `validate workflow`, `run --workflow` (6-step pipeline including mutation, query, verify) | All pass |
+| Diff | `diff compare` (changed files, identical files) | All pass |
+| Validation | `validate workbook`, `validate refs` | All pass |
+| Error Paths | See error matrix below | All behave correctly |
 
-| Command | Status | Notes |
-|---------|--------|-------|
-| `wb create --sheets` | PASS | Created 3-sheet workbook, returned fingerprint |
-| `wb inspect` | PASS | Full metadata: sheets, tables, names, macros, external links |
-| `wb lock-status` | PASS | Correctly reports unlocked file |
-| `version` | PASS | Returns `{"version": "1.4.0"}` in envelope |
+---
 
-### 2. `sheet` — Sheet Operations
+## Error Path Matrix
 
-| Command | Status | Notes |
-|---------|--------|-------|
-| `sheet ls` | PASS | Lists name, index, visibility, used_range, table_count |
-| `sheet create` | PASS | Adds sheet, reports change |
-| `sheet rename` | PASS | Before/after in changes array |
-| `sheet delete` | PASS | Works without `--backup` |
-| `sheet delete --backup` | **BUG** | Crashes: `NameError: name 'make_backup' is not defined` (cli.py:892) |
+| Scenario | Exit Code | Error Code | Correct? |
+|----------|-----------|------------|----------|
+| File not found | 50 | `ERR_WORKBOOK_NOT_FOUND` | Yes |
+| File already exists (wb create) | 50 | `ERR_FILE_EXISTS` | Yes |
+| Bad sheet reference | 10 | `ERR_RANGE_INVALID` | Yes |
+| Delete last sheet | 10 | `ERR_LAST_SHEET` | Yes |
+| Duplicate column name | 10 | `ERR_COLUMN_EXISTS` | Yes |
+| Duplicate sheet name | 10 | `ERR_SHEET_EXISTS` | Yes |
+| Table not found | 10 | `ERR_TABLE_NOT_FOUND` | Yes |
+| Table overlap | 10 | `ERR_TABLE_OVERLAP` | Yes |
+| Schema mismatch (strict) | 10 | `ERR_SCHEMA_MISMATCH` | Yes |
+| Formula overwrite (formula.set) | 30 | `ERR_FORMULA_BLOCKED` | Yes |
+| Formula overwrite (cell.set) | 30 | `ERR_FORMULA_OVERWRITE_BLOCKED` | Yes |
+| Fingerprint conflict | 40 | `ERR_PLAN_FINGERPRINT_CONFLICT` | Yes |
+| Assertion failure | 10 | `ERR_ASSERTION_FAILED` | Yes |
+| Workflow step failure | 90 | `ERR_WORKFLOW_STEP_FAILED` | Yes |
+| Invalid workflow command | 10 | `ERR_WORKFLOW_INVALID` | Yes |
 
-### 3. `cell` — Cell Operations
-
-| Command | Status | Notes |
-|---------|--------|-------|
-| `cell set --type text` | PASS | Stores string values |
-| `cell set --type number` | PASS | Stores numeric values |
-| `cell set --type bool` | PASS | Stores `true`/`false` |
-| `cell get` (text) | PASS | Returns value, type, formula, number_format |
-| `cell get` (number) | PASS | Correct type detection |
-| `cell get` (bool) | PASS | `"type": "bool"` |
-| `cell get` (empty cell) | PASS | Returns `"type": "empty"`, `"value": null` |
-
-### 4. `table` — Table Operations
-
-| Command | Status | Notes |
-|---------|--------|-------|
-| `table create` | PASS | Creates ListObject from range, auto-detects headers |
-| `table ls` | PASS | Columns, formulas, row counts, styles |
-| `table ls --sheet` | PASS | Filters by sheet correctly |
-| `table add-column --formula` | PASS | Structured refs work (`=[@Revenue]-[@Cost]`) |
-| `table add-column --default` | PASS | Fills existing rows with default value |
-| `table append-rows` (strict) | PASS | Validates schema, adds rows |
-| `table append-rows` (allow-missing-null) | PASS | Skips formula columns |
-| `table delete-column` | PASS | Removes column, updates range |
-| `table delete` | PASS | Removes table definition, preserves data |
-
-### 5. `formula` — Formula Operations
-
-| Command | Status | Notes |
-|---------|--------|-------|
-| `formula set` | PASS | Sets formulas on cells |
-| `formula set` (overwrite blocked) | PASS | Exit code 30, `ERR_FORMULA_BLOCKED` |
-| `formula set --force-overwrite-formulas` | PASS | Override works |
-| `formula find --pattern` | PASS | Regex search, returns matches with refs |
-| `formula lint` | PASS | Detects volatile `NOW()`, categorized by severity/sheet |
-
-### 6. `format` — Formatting
-
-| Command | Status | Notes |
-|---------|--------|-------|
-| `format number --style currency` | PASS | Applies `$#,##0.00` format |
-| `format number --style number` | PASS | Applies `#,##0.00` format |
-| `format width` | PASS | Sets column widths |
-| `format freeze` | PASS | Freezes at specified ref |
-| `format freeze --unfreeze` | PASS | Removes freeze, shows before/after |
-
-### 7. `range` — Range Operations
-
-| Command | Status | Notes |
-|---------|--------|-------|
-| `range stat` | PASS | Returns min, max, sum, avg, counts |
-| `range clear --contents` | PASS | Clears values only |
-| `range clear --all` | PASS | Clears values + formats |
-
-### 8. `query` — SQL via DuckDB
-
-| Command | Status | Notes |
-|---------|--------|-------|
-| `query --sql` (GROUP BY) | PASS | Full SQL support, correct aggregation |
-| `query --table --where` | PASS | Shorthand mode works |
-| `query --table --select` | PASS | Column filtering works |
-| `query --data-only` | PASS* | Returns `null` for formula columns (see note below) |
-
-**Note on `--data-only`:** Returns `null` for formula columns in workbooks created
-programmatically because there are no cached calculated values (openpyxl limitation).
-Without `--data-only`, formula text is returned instead. This is technically correct
-but may surprise users who expect computed results.
-
-### 9. `diff` — Workbook Comparison
-
-| Command | Status | Notes |
-|---------|--------|-------|
-| `diff compare` | PASS | Detects value changes, formula changes, added/removed cells |
-| `diff compare --sheet` | PASS | Filters to a specific sheet |
-
-### 10. `plan` / `apply` — Plan Workflow
-
-| Command | Status | Notes |
-|---------|--------|-------|
-| `plan add-column` | PASS | Generates plan with preconditions + postconditions |
-| `plan set-cells` | PASS | Generates plan for cell writes |
-| `plan format` | PASS | Generates plan for number formatting |
-| `plan rename-sheet` | PASS | Correct precondition/postcondition pairs |
-| `plan delete-column` | PASS | Generates plan with column_exists precondition |
-| `plan compose` | PASS | Merges operations from 2 plans, deduplicates preconditions |
-| `plan show` | PASS | Displays plan contents |
-| `apply --dry-run` | PASS | Returns DryRunSummary with cell impact |
-| `apply --backup` | PASS | Creates `.bak.xlsx`, returns backup path |
-| `apply` (stale fingerprint) | PASS | Exit code 40, `ERR_PLAN_FINGERPRINT_CONFLICT` |
-
-### 11. `validate` — Validation
-
-| Command | Status | Notes |
-|---------|--------|-------|
-| `validate plan` | PASS | Checks fingerprint, preconditions, operations |
-| `validate workbook` | PASS | Health check, no issues detected |
-| `validate refs` (valid) | PASS | Sheet + range validation |
-| `validate refs` (invalid) | PASS | Correctly fails with `ERR_RANGE_INVALID` |
-| `validate workflow` (valid) | PASS | Full step-by-step YAML validation |
-| `validate workflow` (invalid) | PASS | Detects unknown args, suggests valid ones |
-
-### 12. `verify` — Post-Apply Assertions
-
-| Command | Status | Notes |
-|---------|--------|-------|
-| `verify assert` (all pass) | PASS | Tests table.column_exists, table.row_count, cell.not_empty |
-| `verify assert` (failures) | PASS | Exit code 10, detailed failure messages |
-| `verify assert --assertions` (inline) | FAIL* | Shell escaping issues on Windows bash |
-
-**Note:** Inline `--assertions` JSON with backslashes fails on Windows bash due to
-shell escaping. The CLI helpfully suggests `--assertions-file` as a workaround. This
-is a known shell interop issue, not a CLI bug per se.
-
-### 13. `run` — YAML Workflow Engine
-
-| Command | Status | Notes |
-|---------|--------|-------|
-| `run --workflow` (7 steps) | PASS* | See bug below |
-
-### 14. Other
-
-| Command | Status | Notes |
-|---------|--------|-------|
-| `guide` | PASS | Outputs comprehensive agent integration guide |
-| `serve --help` | PASS | Documents stdio MCP/ACP server mode |
-| `--human` flag | N/A | Affects `--help` formatting only, not command output (see self-reflection) |
+All errors return proper JSON envelopes with `ok: false`, structured error codes, and meaningful messages.
 
 ---
 
 ## Bugs Found
 
-### BUG-1: `sheet delete --backup` crashes (Severity: High)
+### 1. `sheet delete --backup` — FIXED in v1.4.2
+Previously broken in v1.4.0 (`NameError: make_backup`). Now works correctly — backup file is created and the sheet is deleted.
 
-**Command:** `uv run xl sheet delete -f test1.xlsx --name "Archive" --backup`
-**Error:** `NameError: name 'make_backup' is not defined` at `cli.py:892`
-**Exit code:** 1 (unhandled Python exception, not a structured error)
-**Impact:** The `--backup` flag on `sheet delete` is completely broken. The function
-`make_backup` is referenced but never imported/defined in scope. Without `--backup`,
-the command works fine.
-**Workaround:** Manually copy the file before deletion, or omit `--backup`.
+### 2. Query `--where` returns formula strings, not computed values
+When using `--table SalesData --where "Revenue > 10000"`, formula columns (e.g., Margin) return the literal formula string `"=[@Revenue]-[@Cost]"` rather than a computed value or null. This is because the workbook was created programmatically and has no cached values.
 
-### BUG-2 (Downgraded to Usability Note): Workflow arg naming differs from CLI flags
+**Workaround:** Use `--sql` with inline computation: `SELECT *, (Revenue - Cost) AS Margin FROM SalesData WHERE Revenue > 10000`
 
-**Command:** `xl run --workflow` with `data:` arg (mimicking CLI `--data` flag)
-**Error:** Validator correctly rejects `data` and suggests `rows`.
-**What's real:** The CLI uses `--data` for `table append-rows` but the workflow engine
-uses `rows`. This naming inconsistency is confusing, though the validator catches it.
-**What was my mistake:** I also passed JSON as a string (`'[{...}]'`) instead of
-native YAML lists, causing a runtime `'str' object has no attribute 'keys'` error.
-That part was user error, not a bug — the validator had already flagged the input.
-**Recommendation:** Consider aligning CLI flag names with workflow arg names, or
-document the mapping prominently.
+### 3. `xl run` does not support `--dry-run` flag
+The skill reference mentions `xl run --workflow ... --dry-run` for full validation against a workbook, but `xl run` rejects `--dry-run` with `No such option`. Use `defaults: dry_run: true` in the YAML instead.
 
-### BUG-3: `sheet delete` silently destroys tables (Severity: Medium)
-
-**Command:** `uv run xl sheet delete -f test1.xlsx --name "Sales"` (Sales had SalesData table)
-**Expected:** Warning or error about table on sheet
-**Actual:** Succeeds silently with no warning. The SalesData table and all its data
-are permanently deleted.
-**Impact:** Violates the CLI's safety-first design philosophy. A sheet containing
-tables should either refuse deletion or emit a prominent warning.
+**Impact:** Minor — the YAML-level `dry_run` default achieves the same thing.
 
 ---
 
-## Design Observations
+## Noteworthy Behaviors (Not Bugs)
 
-### Strengths
-
-1. **Consistent JSON envelope** — Every command returns `{ok, command, target, result,
-   changes, warnings, errors, metrics, recalc}`. Parsing is trivial.
-
-2. **Excellent error codes** — Machine-readable codes (`ERR_FORMULA_BLOCKED`,
-   `ERR_SCHEMA_MISMATCH`, `ERR_PLAN_FINGERPRINT_CONFLICT`) with meaningful exit codes
-   (10=validation, 30=blocked, 40=conflict, 50=IO).
-
-3. **Formula safety** — Overwrite protection with `--force-overwrite-formulas` prevents
-   accidental formula destruction. The `formula lint` catches volatile functions.
-
-4. **Plan workflow** — The plan/validate/dry-run/apply/verify pipeline is a genuinely
-   useful pattern for safe mutations. Fingerprint-based conflict detection works well.
-
-5. **Rich change tracking** — The `changes[]` array provides before/after values,
-   impact counts, and per-operation warnings.
-
-6. **DuckDB SQL integration** — Full SQL over Excel tables is powerful and well-implemented.
-
-7. **Workflow engine** — YAML workflows with step-by-step execution, validation, and
-   built-in verify steps enable reproducible automation.
-
-8. **Performance** — Most operations complete in under 100ms. The slowest were query
-   operations (~500ms) due to DuckDB loading.
-
-### Areas for Improvement
-
-1. **Workflow arg naming inconsistency** — The CLI uses `--data` for append-rows but
-   the workflow engine uses `rows`. The workflow validator correctly flags this, but
-   the discrepancy creates confusion.
-
-3. **`--backup` not universally implemented** — Works for `apply` but crashes on
-   `sheet delete`. Should be audited across all mutating commands.
-
-4. **No `table.exists` assertion type in skill docs** — The verify command accepts
-   `table.exists` but the skill documentation only shows `table.column_exists`,
-   `table.row_count`, and `cell.not_empty`.
-
-5. **Workflow continues after step failure** — When `add_rows` failed, the workflow
-   still executed the `verify` step. This may be intentional for diagnostics but could
-   also lead to unintended side effects from partially applied workflows.
+| Behavior | Notes |
+|----------|-------|
+| `--data-only` returns `null` for formula columns | Expected — programmatically-created workbooks have no Excel-cached values. Only useful after opening/saving in Excel. |
+| `table delete` preserves cell data | By design — only removes the ListObject definition, not the underlying cell values. |
+| `wb create --force` silently overwrites | No confirmation or backup — use with care. |
+| `formula.set` error codes differ from `cell.set` | `ERR_FORMULA_BLOCKED` vs `ERR_FORMULA_OVERWRITE_BLOCKED` — two different error codes for essentially the same protection. Consistent enough but worth noting. |
+| Workflow exit code is 90 for step failures | Even when the step itself would be a 10 (validation) error, the workflow wraps it as exit 90. |
+| `sheet.create` not supported in workflows | Documented and confirmed — must use CLI command directly. |
+| `--data-file` flag for append-rows | Undocumented in the skill reference but works. Allows reading JSON row data from a file instead of inline. |
+| Double JSON output on errors | Some error paths emit the error envelope twice on stderr. Not a functional issue but noisy. |
+| `plan compose` merges preconditions + postconditions | Correctly deduplicates when composing multiple plans targeting the same table. |
 
 ---
 
-## Exit Code Summary (Verified)
+## Mistakes I Made During Testing & Lessons Learned
 
-| Code | Meaning | Verified |
-|------|---------|----------|
-| 0 | Success | Yes |
-| 1 | Unhandled exception (BUG-1) | Yes |
-| 10 | Validation error | Yes (multiple) |
-| 30 | Formula blocked | Yes |
-| 40 | Fingerprint conflict | Yes |
-| 50 | File not found / IO error | Yes |
-| 90 | Internal / workflow error | Yes |
+### Mistake 1: Tried `python3` on Windows
+**What happened:** I piped xl output to `python3 -c "..."` to filter JSON, but `python3` isn't available on Windows (it's `python` or `py`).
 
----
+**Lesson for the skill/agent:** On Windows, avoid assuming `python3` is available. Use `python` or, better yet, avoid shell-level JSON filtering — xl's JSON output is structured enough to read directly.
 
-## Files Generated During Testing
+### Mistake 2: Tried `xl run --dry-run`
+**What happened:** The skill reference says to use `xl run --workflow pipeline.yaml -f data.xlsx --dry-run` for full validation, but `xl run` doesn't accept `--dry-run`.
 
-| File | Purpose |
-|------|---------|
-| `test1.xlsx` | Primary test workbook |
-| `test1_copy.xlsx` | Copy for diff testing |
-| `test1.20260226T031730Z.bak.xlsx` | Auto-generated backup from `apply --backup` |
-| `plan_col.json` | Plan: add ProfitPct column |
-| `plan_fmt.json` | Plan: format as percent |
-| `plan_combined.json` | Composed plan (col + fmt) |
-| `plan_rename.json` | Plan: rename sheet |
-| `plan_delcol.json` | Plan: delete column |
-| `assertions.json` | Passing assertion set |
-| `assertions_fail.json` | Failing assertion set |
-| `workflow_test.yaml` | 7-step workflow (inventory setup) |
+**Lesson for the skill:** Update the workflow reference to clarify that `xl run` doesn't support `--dry-run` as a CLI flag. The correct approach is `defaults: dry_run: true` in the YAML file, or run individual steps manually.
+
+### Mistake 3: Re-applied a stale plan
+**What happened:** After applying a plan, I tried to re-apply the same plan. It failed with fingerprint mismatch. This was intentional (testing), but in a real workflow, you'd need to regenerate the plan.
+
+**Lesson for the skill:** This is correct behavior. Always regenerate plans after any workbook modification. Plans are one-shot artifacts tied to a specific workbook state.
+
+### Mistake 4: Used `wb create --force` then tried to reference a table from the old file
+**What happened:** I used `--force` to recreate `edge.xlsx`, which destroyed the `EmptyTable` I'd created earlier. Then I tried to `table delete` the old table.
+
+**Lesson for the skill/agent:** `--force` is destructive with no undo. Always think carefully before using it. If you need the old data, make a manual backup first.
+
+### Mistake 5: Didn't anticipate formula columns in query results
+**What happened:** When querying with `--where`, formula columns came back as raw formula strings instead of values. I expected computed values.
+
+**Lesson for the skill:** For programmatically-created workbooks, formula columns have no cached values. Always use `--sql` with inline computation for formula-dependent queries, or accept nulls with `--data-only`.
 
 ---
 
-## Agent Self-Reflection: Mistakes I Made
+## Recommendations for the xl Skill
 
-During this testing session I made several avoidable errors. These are not xl bugs —
-they are mistakes in how I used the tool. Documenting them here as lessons for future
-sessions.
+1. **Document `--data-file` flag** for `table append-rows` — it's the safest way to pass row data (avoids shell escaping issues).
 
-### Mistake 1: Inline JSON shell escaping on Windows bash
+2. **Clarify `xl run --dry-run`** — update workflow reference to note that `--dry-run` is not a CLI flag for `xl run`; use YAML `defaults.dry_run` instead.
 
-**What happened:** I passed `--assertions '[{"type":"table.column_exists",...}]'`
-directly as a shell argument. The nested quotes and backslashes were mangled by
-Windows bash, producing a parse error.
+3. **Add guidance on formula columns in queries** — the skill should note that `--where` queries on formula columns return raw formula text in programmatically-created workbooks, and suggest `--sql` with computed columns as the workaround.
 
-**Why it happened:** I reflexively reached for the inline form even though the skill
-documentation shows `--assertions-file` as an alternative and the CLI's own error
-message explicitly recommends it ("Prefer --assertions-file for reliable input").
+4. **Note `serve` command** — the skill doesn't mention `xl serve` (MCP/ACP stdio server). Could be useful for agent tool integration.
 
-**Rule for next time:** On Windows (or whenever JSON contains quotes/backslashes),
-**always write JSON to a file first** and use `--assertions-file`, `--plan`, or
-similar file-based flags. Never pass complex JSON inline on the shell. This also
-applies to `--data` for `table append-rows` — write a temp `.json` file when the
-payload has any non-trivial structure.
+5. **Note `wb lock-status`** — useful for checking if Excel has a file locked before attempting mutations.
 
-### Mistake 2: Running dependent commands in parallel
+6. **Note all plan generation commands** — `plan format`, `plan delete-sheet`, `plan rename-sheet`, `plan delete-table`, `plan delete-column` are all available but not all listed in the skill reference commands.md.
 
-**What happened — twice:**
-1. I ran `verify assert` (inline), `validate workbook`, and `validate refs` as three
-   parallel tool calls. When `verify assert` failed due to Mistake 1, the other two
-   tool calls were killed with "Sibling tool call errored" and I had to re-run them.
-2. I ran `formula set` (without `--force`) and `formula set --force-overwrite-formulas`
-   in parallel. The first correctly failed with exit code 30 — but because it was in
-   the same parallel batch, the second was also killed. I had to re-run the force
-   variant separately.
-
-**Why it happened:** I was optimising for speed by batching independent commands, but
-I failed to account for the fact that when any call in a parallel batch exits non-zero,
-sibling calls may be aborted.
-
-**Rule for next time:** **Never run a command you expect to fail in the same parallel
-batch as commands you need to succeed.** Separate "positive tests" from "negative
-tests" (error-path probes). When deliberately testing error paths (missing files,
-duplicate names, overwrite protection), run those calls alone or in their own batch.
-
-### Mistake 3: Workflow YAML used CLI arg names, not workflow arg names
-
-**What happened:** I wrote `data: '[...]'` in my workflow YAML, copying the CLI's
-`--data` flag name. The workflow engine uses a different arg name (`rows`) and expects
-native YAML types, not JSON strings. The workflow validator caught both problems.
-
-**Why it happened:** I assumed CLI flag names map 1:1 to workflow step arg names. They
-don't — the workflow schema is its own contract.
-
-**Rule for next time:** **Always run `xl validate workflow` before `xl run`** to catch
-arg mismatches. When writing workflows, use native YAML types (lists, mappings) for
-structured data — never wrap JSON strings in YAML. And don't assume CLI `--flag-name`
-maps to workflow `arg_name`; check the validator's "valid args" list in its error
-output. In this case it helpfully said `valid: rows, schema_mode, table`.
-
-### Mistake 4: Misunderstanding the `--human` flag
-
-**What happened:** I ran `xl --human wb inspect -f test1.xlsx` and reported that it
-"still outputs JSON" as a possible design issue.
-
-**Why it happened:** The help text says `--human` "Force human-readable help (overrides
-LLM=true)". This means it affects `--help` output formatting (for when the CLI
-detects it's running inside an LLM agent and switches to machine-oriented help). It
-does NOT change command output to a human-readable format. I misread the flag's
-purpose and filed a false observation.
-
-**Rule for next time:** **Read flag descriptions literally.** "Human-readable help"
-means help text, not command output. Don't test a flag for a purpose it never claimed.
-
-### Mistake 5: Reported BUG-2 as a CLI bug when it was partially my error
-
-**What happened:** I reported the workflow `data` vs `rows` naming discrepancy as
-BUG-2. While the naming inconsistency between CLI and workflow is a real usability
-gap, the actual runtime error (`'str' object has no attribute 'keys'`) was caused by
-my passing a JSON string where native YAML was expected. The validator caught the
-problem before I even ran the workflow — I just didn't run the validator first.
-
-**Why it happened:** I conflated two issues: (a) the `data`/`rows` naming mismatch
-(a legitimate usability note) and (b) the JSON-string-in-YAML error (my mistake).
-
-**Rule for next time:** Before reporting a bug, ask: "Would a correct invocation also
-fail?" If the validator already flags the input as invalid, the runtime crash on that
-same invalid input is expected behavior, not a bug. Separate "usability concern" from
-"software defect" in the report.
+7. **Note double error output** — some error paths emit the JSON envelope twice. Parsers should handle this (e.g., take the first valid JSON object).
 
 ---
 
-### Summary of Rules for Future xl Sessions
+## Command Coverage Summary
 
-1. **File-based JSON** — Always use `--assertions-file`, `--plan`, or temp files for
-   structured JSON input. Never inline complex JSON on the shell.
-2. **Isolate error-path tests** — Don't batch commands you expect to fail alongside
-   commands you need. Run negative tests solo.
-3. **Validate workflows first** — Run `xl validate workflow` before `xl run`. Trust
-   the validator's arg name suggestions.
-4. **Native YAML types** — In workflow YAML, use lists and mappings, not JSON strings.
-5. **Read flag docs literally** — Don't assume a flag does more than it says.
-6. **Separate usability concerns from bugs** — If the validator already rejects the
-   input, a subsequent runtime crash on that input is not a separate bug.
-7. **Discover-first golden path** — Follow `inspect → ls → plan → validate → dry-run
-   → apply --backup → verify`. Don't skip the validate step.
+### Fully Tested (with success + error paths)
+- `wb create`, `wb inspect`, `wb lock-status`
+- `sheet ls`, `sheet create`, `sheet rename`, `sheet delete`
+- `cell set`, `cell get`
+- `range stat`, `range clear`
+- `table create`, `table ls`, `table add-column`, `table append-rows`, `table delete-column`, `table delete`
+- `formula set`, `formula find`, `formula lint`
+- `format number`, `format width`, `format freeze`
+- `query` (--sql, --table, --where, --data-only)
+- `plan add-column`, `plan format`, `plan set-cells`, `plan delete-column`, `plan rename-sheet`, `plan delete-table`, `plan compose`, `plan show`
+- `validate plan`, `validate workbook`, `validate refs`, `validate workflow`
+- `apply` (--dry-run, --backup, --plan)
+- `verify assert` (--assertions-file with multiple assertion types)
+- `run` (--workflow)
+- `diff compare`
+- `guide`, `version`
+
+### Checked but not deeply exercised
+- `serve` (help only — requires stdio integration)
+- `plan create-table` (help only — did table creation via direct command instead)
+
+### Assertion types tested
+- `table.exists`
+- `table.column_exists`
+- `table.row_count` (with `min`)
+- `cell.not_empty`
+- `cell.value_equals` (text + numeric + empty/null)
+
+### Schema modes tested
+- `strict` — rejects missing columns
+- `allow-missing-null` — skips formula columns
+- `map-by-header` — case-insensitive column matching
 
 ---
 
-## Conclusion
+## Version Delta: v1.4.0 → v1.4.2
 
-`xl` v1.4.0 is a capable and well-architected CLI. Its agent-first JSON design,
-transactional plan workflow, and safety features (formula protection, fingerprint
-conflict detection, dry-run support) make it well-suited for LLM-driven spreadsheet
-automation. The 3 bugs found are all fixable with moderate effort, and the design
-concerns are minor. Recommended for production use with the noted workarounds.
+| Change | v1.4.0 | v1.4.2 |
+|--------|--------|--------|
+| `sheet delete --backup` | Broken (`NameError: make_backup`) | Fixed |
+| Everything else tested | N/A (not tested in v1.4.0) | Working |

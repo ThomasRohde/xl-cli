@@ -373,6 +373,8 @@ def _run_query(ctx: Any, sql: str) -> dict[str, Any]:
 def execute_workflow(
     workflow: WorkflowSpec,
     workbook_path: str | Path,
+    *,
+    wait_lock: float = 0,
 ) -> dict[str, Any]:
     """Execute a workflow against a workbook. Returns combined results."""
     from xl.adapters.openpyxl_engine import (
@@ -391,6 +393,7 @@ def execute_workflow(
         table_create,
     )
     from xl.engine.context import WorkbookContext
+    from xl.io.fileops import WorkbookLock
     from xl.validation.validators import validate_plan, validate_workbook
 
     results: list[dict[str, Any]] = []
@@ -398,6 +401,33 @@ def execute_workflow(
     # Pre-scan: open in data_only mode when no step can mutate, so cached
     # formula values are preserved and the workbook stays identical on disk.
     has_mutating_steps = any(s.run in _MUTATING_STEPS for s in workflow.steps)
+
+    # Acquire exclusive lock for the entire workflow when it contains mutations.
+    lock = WorkbookLock(workbook_path, timeout=wait_lock) if has_mutating_steps else None
+    if lock:
+        lock.__enter__()
+
+    try:
+        return _execute_workflow_inner(workflow, workbook_path, results,
+                                       has_mutating_steps=has_mutating_steps,
+                                       imports=(cell_get, cell_set, format_freeze, format_number,
+                                                format_width, formula_find, formula_lint, formula_set,
+                                                range_clear, range_stat, table_add_column,
+                                                table_append_rows, table_create,
+                                                WorkbookContext, validate_plan, validate_workbook))
+    finally:
+        if lock:
+            lock.__exit__(None, None, None)
+
+
+def _execute_workflow_inner(workflow, workbook_path, results, *, has_mutating_steps, imports):
+    """Inner execution loop — separated to avoid re-indenting 300 lines."""
+    (cell_get, cell_set, format_freeze, format_number,
+     format_width, formula_find, formula_lint, formula_set,
+     range_clear, range_stat, table_add_column,
+     table_append_rows, table_create,
+     WorkbookContext, validate_plan, validate_workbook) = imports
+
     ctx = WorkbookContext(workbook_path, data_only=not has_mutating_steps)
     mutated = False
 

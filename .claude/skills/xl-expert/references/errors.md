@@ -67,7 +67,7 @@ When a plan's fingerprint doesn't match the current workbook:
 | `ERR_WORKBOOK_NOT_FOUND` | File doesn't exist | Check path |
 | `ERR_WORKBOOK_CORRUPT` | Workbook can't be parsed | File may be damaged or not a valid xlsx/xlsm |
 | `ERR_FILE_EXISTS` | File already exists (for create) | Use a different name, remove existing, or use `--force` |
-| `ERR_LOCK_HELD` | File locked by another process | Close Excel or other programs; check with `wb lock-status` |
+| `ERR_LOCK_HELD` | File locked by another process | Use `--wait-lock 5` to retry, or check with `wb lock-status` |
 | `ERR_IO` | General I/O error | Check file permissions and disk space |
 
 ## Protection Error Codes (Exit 20)

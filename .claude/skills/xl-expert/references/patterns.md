@@ -105,3 +105,23 @@ steps:
 uv run xl run --workflow pipeline.yaml -f budget.xlsx
 uv run xl validate workflow --workflow pipeline.yaml   # syntax check without workbook
 ```
+
+## Multi-Agent / Concurrent Access
+
+When multiple agents or processes may mutate the same workbook simultaneously, use `--wait-lock` to serialize access:
+
+```bash
+# Agent A and Agent B both targeting the same file — use --wait-lock to queue
+uv run xl table add-column -f shared.xlsx -t Sales -n Margin \
+  --formula "=[@Revenue]-[@Cost]" --wait-lock 5
+
+# Check lock status before a batch of operations
+uv run xl wb lock-status -f shared.xlsx
+```
+
+Key points:
+- All mutating commands hold an exclusive `.xl.lock` sidecar lock for the entire read-modify-write cycle
+- `--wait-lock 0` (default) fails immediately with `ERR_LOCK_HELD` if locked
+- `--wait-lock N` retries for up to N seconds before failing
+- Read-only commands (`wb inspect`, `table ls`, `query`, etc.) are never blocked
+- `xl run` workflows hold the lock for the entire workflow when it contains mutating steps

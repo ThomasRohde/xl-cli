@@ -47,6 +47,7 @@ For quick single edits, use direct mutation commands with `--backup` — skip th
 - **`--where` queries on formula columns return raw formula text** in programmatically-created workbooks (no cached values). Use `--sql` with inline computation instead: `SELECT *, (Revenue - Cost) AS Margin FROM Sales WHERE Revenue > 10000`.
 - **`xl run` does not accept `--dry-run` as a CLI flag.** Use `defaults: dry_run: true` in the YAML workflow to preview all steps.
 - **Prefer `--data-file` over `--data` for `table append-rows`** when passing large payloads — avoids shell escaping issues.
+- **Use `--wait-lock` for concurrent/multi-agent access.** All mutating commands acquire an exclusive sidecar lock (`.xl.lock`). By default (`--wait-lock 0`), a locked file fails immediately with `ERR_LOCK_HELD`. Pass `--wait-lock 5` to retry for up to 5 seconds. Read-only commands are never blocked.
 
 ## Command Discovery
 

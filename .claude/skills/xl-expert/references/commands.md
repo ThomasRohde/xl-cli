@@ -70,6 +70,23 @@ uv run xl wb lock-status -f data.xlsx
 uv run xl validate refs -f data.xlsx --ref "Sheet1!A1:D10"
 ```
 
+## Concurrency (--wait-lock)
+
+All mutating commands acquire an exclusive sidecar `.xl.lock` file for the duration of the read-modify-write cycle. This prevents concurrent processes from corrupting the workbook.
+
+```bash
+# Default: fail immediately if locked (exit 50, ERR_LOCK_HELD)
+uv run xl cell set -f data.xlsx --ref "Sheet1!A1" --value 42
+
+# Wait up to 5 seconds for the lock to become available
+uv run xl cell set -f data.xlsx --ref "Sheet1!A1" --value 42 --wait-lock 5
+
+# Check lock status (read-only, never blocked)
+uv run xl wb lock-status -f data.xlsx
+```
+
+`--wait-lock` is available on all mutating commands: `sheet create/delete/rename`, `table create/add-column/append-rows/delete/delete-column`, `cell set`, `formula set`, `format number/width/freeze`, `range clear`, `apply`, and `run`. Read-only commands never acquire the lock.
+
 ## Table Operations
 
 Tables are the preferred abstraction for structured data. Prefer table operations over raw cell manipulation.

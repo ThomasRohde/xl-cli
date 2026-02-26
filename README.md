@@ -60,6 +60,7 @@ All mutating commands include built-in protections:
 | `--dry-run` | Preview every change without writing to disk |
 | `--backup` | Timestamped `.bak` copy before any write |
 | Fingerprint conflict detection | Plans record the file's xxhash; apply rejects if the workbook changed since the plan was created |
+| Exclusive file locking | Sidecar `.xl.lock` prevents concurrent mutations; `--wait-lock N` retries for N seconds |
 | Formula protection | Refuses to overwrite existing formulas unless `--force-overwrite-formulas` is set |
 | Policy files | Optional `xl-policy.yaml` for protected sheets, ranges, mutation thresholds, and command restrictions |
 

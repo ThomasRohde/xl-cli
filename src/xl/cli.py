@@ -62,6 +62,7 @@ Agent-first CLI for reading, transforming, and validating Excel workbooks (.xlsx
 - `--dry-run` previews changes without writing
 - `--backup` creates a timestamped .bak copy before writing
 - Fingerprint-based conflict detection prevents stale overwrites
+- `--wait-lock` exclusive file locking prevents concurrent mutations
 
 **Exit codes:** 0=success, 10=validation, 20=protection, 30=formula, 40=conflict, 50=io, 60=recalc, 70=unsupported, 90=internal
 
@@ -422,6 +423,78 @@ def _write_plan(path: str, plan: PatchPlan) -> None:
     Path(path).write_text(json.dumps(plan.model_dump(mode="json"), indent=2))
 
 
+# Type alias for the --wait-lock option reused across all mutating commands.
+WaitLockOpt = Annotated[float, typer.Option(
+    "--wait-lock",
+    help="Seconds to wait for exclusive file lock (0 = fail immediately if locked).",
+)]
+
+
+def _mutate_workbook(
+    file: str,
+    command: str,
+    *,
+    mutate_fn,
+    dry_run: bool = False,
+    do_backup: bool = False,
+    wait_lock: float = 0,
+):
+    """Acquire exclusive lock, load workbook, mutate, save, release.
+
+    *mutate_fn(ctx)* performs the actual mutation and returns an arbitrary
+    result (typically a ``ChangeRecord``).
+
+    Returns ``(result, backup_path, timer)``.
+
+    On lock failure emits ``ERR_LOCK_HELD`` and exits.  Exceptions raised
+    by *mutate_fn* propagate to the caller for command-specific handling.
+    """
+    import portalocker as _pl
+    from xl.io.fileops import WorkbookLock, backup as make_backup
+
+    try:
+        lock = WorkbookLock(file, timeout=wait_lock)
+    except OSError as exc:
+        env = error_envelope(
+            command, "ERR_IO",
+            f"Cannot create lock file: {exc}",
+            target=Target(file=file),
+        )
+        _emit(env)
+
+    with Timer() as t:
+        try:
+            with lock:
+                ctx = _load_ctx_or_emit(file, command)
+
+                result = mutate_fn(ctx)
+
+                backup_path = None
+                if not dry_run:
+                    if do_backup:
+                        backup_path = make_backup(file)
+                    ctx.save(file)
+                ctx.close()
+        except _pl.LockException:
+            env = error_envelope(
+                command, "ERR_LOCK_HELD",
+                f"File is locked by another process: {file}",
+                target=Target(file=file),
+            )
+            _emit(env)
+        except typer.Exit:
+            raise
+        except Exception:
+            # Ensure workbook is closed before re-raising to caller
+            try:
+                ctx.close()  # type: ignore[possibly-undefined]
+            except Exception:
+                pass
+            raise
+
+    return result, backup_path, t
+
+
 # ---------------------------------------------------------------------------
 # xl version
 # ---------------------------------------------------------------------------
@@ -605,7 +678,8 @@ def guide(
         "safety": {
             "dry_run": "All mutating commands support --dry-run to preview changes without writing",
             "backup": "All mutating commands support --backup to create a timestamped .bak copy",
-            "fingerprint": "Patch plans record the workbook's xxhash; apply rejects if the file changed",
+            "fingerprint": "Patch plans record the workbook's SHA-256 fingerprint; apply rejects if the file changed",
+            "locking": "Mutating commands acquire an exclusive sidecar lock (.xl.lock) to prevent concurrent modifications. Use --wait-lock <seconds> to wait instead of failing immediately when locked.",
             "formula_protection": "cell set and formula set refuse to overwrite formulas unless --force-overwrite-formulas is used",
             "policy": "An optional xl-policy.yaml can restrict protected sheets, ranges, and mutation thresholds",
         },
@@ -754,6 +828,7 @@ def sheet_create(
     position: Annotated[Optional[int], typer.Option("--position", help="Zero-based index to insert the sheet at (default: append at end)")] = None,
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Add a new sheet to an existing workbook. Mutating.
@@ -768,28 +843,29 @@ def sheet_create(
 
     See also: `xl sheet ls` to list existing sheets.
     """
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "sheet.create")
-
+    def _do(ctx):
         if name in ctx.wb.sheetnames:
-            ctx.close()
-            env = error_envelope(
-                "sheet.create", "ERR_SHEET_EXISTS",
-                f"Sheet '{name}' already exists in workbook",
-                target=Target(file=file, sheet=name),
-            )
-            _emit(env)
-            return
-
+            raise ValueError(f"Sheet '{name}' already exists in workbook")
         ctx.wb.create_sheet(name, index=position)
+        return ChangeRecord(
+            type="sheet.create",
+            target=name,
+            after={"sheet": name, "position": position},
+            impact={"cells": 0},
+        )
 
-        backup_path = None
-        if not dry_run:
-            if backup:
-                from xl.io.fileops import backup as make_backup
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "sheet.create",
+            mutate_fn=_do, dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except ValueError:
+        env = error_envelope(
+            "sheet.create", "ERR_SHEET_EXISTS",
+            f"Sheet '{name}' already exists in workbook",
+            target=Target(file=file, sheet=name),
+        )
+        _emit(env)
 
     result = {
         "dry_run": dry_run,
@@ -800,12 +876,7 @@ def sheet_create(
     env = success_envelope(
         "sheet.create", result,
         target=Target(file=file, sheet=name),
-        changes=[ChangeRecord(
-            type="sheet.create",
-            target=name,
-            after={"sheet": name, "position": position},
-            impact={"cells": 0},
-        )],
+        changes=[change],
         duration_ms=t.elapsed_ms,
     )
     _emit(env)
@@ -848,6 +919,7 @@ def sheet_delete_cmd(
     name: Annotated[str, typer.Option("--name", "-n", help="Name of the sheet to delete")],
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Delete a sheet from the workbook. Mutating.
@@ -862,37 +934,26 @@ def sheet_delete_cmd(
     """
     from xl.adapters.openpyxl_engine import sheet_delete
 
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "sheet.delete")
-
-        try:
-            change = sheet_delete(ctx, name)
-        except KeyError:
-            ctx.close()
-            env = error_envelope(
-                "sheet.delete", "ERR_SHEET_NOT_FOUND",
-                f"Sheet '{name}' not found in workbook",
-                target=Target(file=file, sheet=name),
-            )
-            _emit(env)
-            return
-        except ValueError as e:
-            ctx.close()
-            env = error_envelope(
-                "sheet.delete", "ERR_LAST_SHEET",
-                str(e),
-                target=Target(file=file, sheet=name),
-            )
-            _emit(env)
-            return
-
-        backup_path = None
-        if not dry_run:
-            if backup:
-                from xl.io.fileops import backup as make_backup
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "sheet.delete",
+            mutate_fn=lambda ctx: sheet_delete(ctx, name),
+            dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except KeyError:
+        env = error_envelope(
+            "sheet.delete", "ERR_SHEET_NOT_FOUND",
+            f"Sheet '{name}' not found in workbook",
+            target=Target(file=file, sheet=name),
+        )
+        _emit(env)
+    except ValueError as e:
+        env = error_envelope(
+            "sheet.delete", "ERR_LAST_SHEET",
+            str(e),
+            target=Target(file=file, sheet=name),
+        )
+        _emit(env)
 
     warnings = change.warnings if change.warnings else []
     result = {"dry_run": dry_run, "backup_path": backup_path, "sheet": name}
@@ -916,6 +977,7 @@ def sheet_rename_cmd(
     new_name: Annotated[str, typer.Option("--new-name", help="New name for the sheet")],
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Rename a sheet in the workbook. Mutating.
@@ -929,36 +991,26 @@ def sheet_rename_cmd(
     """
     from xl.adapters.openpyxl_engine import sheet_rename
 
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "sheet.rename")
-
-        try:
-            change = sheet_rename(ctx, name, new_name)
-        except KeyError:
-            ctx.close()
-            env = error_envelope(
-                "sheet.rename", "ERR_SHEET_NOT_FOUND",
-                f"Sheet '{name}' not found",
-                target=Target(file=file, sheet=name),
-            )
-            _emit(env)
-            return
-        except ValueError as e:
-            ctx.close()
-            env = error_envelope(
-                "sheet.rename", "ERR_SHEET_EXISTS",
-                str(e),
-                target=Target(file=file, sheet=name),
-            )
-            _emit(env)
-            return
-
-        backup_path = None
-        if not dry_run:
-            if backup:
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "sheet.rename",
+            mutate_fn=lambda ctx: sheet_rename(ctx, name, new_name),
+            dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except KeyError:
+        env = error_envelope(
+            "sheet.rename", "ERR_SHEET_NOT_FOUND",
+            f"Sheet '{name}' not found",
+            target=Target(file=file, sheet=name),
+        )
+        _emit(env)
+    except ValueError as e:
+        env = error_envelope(
+            "sheet.rename", "ERR_SHEET_EXISTS",
+            str(e),
+            target=Target(file=file, sheet=name),
+        )
+        _emit(env)
 
     result = {"dry_run": dry_run, "backup_path": backup_path, "old_name": name, "new_name": new_name}
     env = success_envelope(
@@ -1020,6 +1072,7 @@ def table_add_column_cmd(
     default_value: Annotated[Optional[str], typer.Option("--default", help="Default static value to fill in all rows")] = None,
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Add a new column to an Excel table. Mutating.
@@ -1036,29 +1089,18 @@ def table_add_column_cmd(
     See also: `xl plan add-column` to generate a plan instead of mutating directly.
     """
     from xl.adapters.openpyxl_engine import table_add_column
-    from xl.io.fileops import backup as make_backup
 
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "table.add_column")
-
-        try:
-            change = table_add_column(ctx, table, name, formula=formula, default_value=default_value)
-        except ValueError as e:
-            ctx.close()
-            err = str(e).lower()
-            if "already exists" in err:
-                code = "ERR_COLUMN_EXISTS"
-            else:
-                code = "ERR_TABLE_NOT_FOUND"
-            env = error_envelope("table.add_column", code, str(e), target=Target(file=file, table=table))
-            _emit(env)
-
-        backup_path = None
-        if not dry_run:
-            if backup:
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "table.add_column",
+            mutate_fn=lambda ctx: table_add_column(ctx, table, name, formula=formula, default_value=default_value),
+            dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except ValueError as e:
+        err = str(e).lower()
+        code = "ERR_COLUMN_EXISTS" if "already exists" in err else "ERR_TABLE_NOT_FOUND"
+        env = error_envelope("table.add_column", code, str(e), target=Target(file=file, table=table))
+        _emit(env)
 
     result = {
         "dry_run": dry_run,
@@ -1086,6 +1128,7 @@ def table_append_rows_cmd(
     schema_mode: Annotated[str, typer.Option("--schema-mode", help="'strict' (exact match), 'allow-missing-null' (missing cols→null), 'map-by-header' (match by name)")] = "strict",
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Append rows to an Excel table. Mutating.
@@ -1100,7 +1143,7 @@ def table_append_rows_cmd(
     """
     from xl.adapters.openpyxl_engine import table_append_rows
 
-    # Parse row data
+    # Parse row data (before lock — no file access needed)
     if data:
         try:
             rows = json.loads(data)
@@ -1120,24 +1163,16 @@ def table_append_rows_cmd(
         _emit(env)
         return  # unreachable due to _emit raising
 
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "table.append_rows")
-
-        try:
-            change = table_append_rows(ctx, table, rows, schema_mode=schema_mode)
-        except ValueError as e:
-            ctx.close()
-            code = "ERR_SCHEMA_MISMATCH" if "columns" in str(e).lower() else "ERR_TABLE_NOT_FOUND"
-            env = error_envelope("table.append_rows", code, str(e), target=Target(file=file, table=table))
-            _emit(env)
-
-        backup_path = None
-        if not dry_run:
-            if backup:
-                from xl.io.fileops import backup as make_backup
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "table.append_rows",
+            mutate_fn=lambda ctx: table_append_rows(ctx, table, rows, schema_mode=schema_mode),
+            dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except ValueError as e:
+        code = "ERR_SCHEMA_MISMATCH" if "columns" in str(e).lower() else "ERR_TABLE_NOT_FOUND"
+        env = error_envelope("table.append_rows", code, str(e), target=Target(file=file, table=table))
+        _emit(env)
 
     result = {"dry_run": dry_run, "backup_path": backup_path}
     env = success_envelope(
@@ -1163,6 +1198,7 @@ def table_create_cmd(
     style: Annotated[str, typer.Option("--style", help="Table style name (e.g. 'TableStyleMedium2')")] = "TableStyleMedium2",
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Create an Excel Table (ListObject) from a cell range. Mutating.
@@ -1178,35 +1214,27 @@ def table_create_cmd(
     See also: `xl table ls` to list existing tables, `xl plan create-table` to generate a plan.
     """
     from xl.adapters.openpyxl_engine import table_create
-    from xl.io.fileops import backup as make_backup
 
     col_list = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
 
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "table.create")
-
-        try:
-            change = table_create(ctx, sheet, table, ref, columns=col_list, style=style)
-        except (ValueError, KeyError) as e:
-            ctx.close()
-            err = str(e).lower()
-            if "already exists" in err:
-                code = "ERR_TABLE_EXISTS"
-            elif "overlap" in err:
-                code = "ERR_TABLE_OVERLAP"
-            elif "not found" in err:
-                code = "ERR_SHEET_NOT_FOUND"
-            else:
-                code = "ERR_INVALID_ARGUMENT"
-            env = error_envelope("table.create", code, str(e), target=Target(file=file, sheet=sheet, table=table))
-            _emit(env)
-
-        backup_path = None
-        if not dry_run:
-            if backup:
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "table.create",
+            mutate_fn=lambda ctx: table_create(ctx, sheet, table, ref, columns=col_list, style=style),
+            dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except (ValueError, KeyError) as e:
+        err = str(e).lower()
+        if "already exists" in err:
+            code = "ERR_TABLE_EXISTS"
+        elif "overlap" in err:
+            code = "ERR_TABLE_OVERLAP"
+        elif "not found" in err:
+            code = "ERR_SHEET_NOT_FOUND"
+        else:
+            code = "ERR_INVALID_ARGUMENT"
+        env = error_envelope("table.create", code, str(e), target=Target(file=file, sheet=sheet, table=table))
+        _emit(env)
 
     result = {
         "dry_run": dry_run,
@@ -1231,6 +1259,7 @@ def table_delete_cmd(
     table: Annotated[str, typer.Option("--table", "-t", help="Name of the table to delete")],
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Delete an Excel Table definition (preserves cell data). Mutating.
@@ -1246,28 +1275,19 @@ def table_delete_cmd(
     """
     from xl.adapters.openpyxl_engine import table_delete
 
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "table.delete")
-
-        try:
-            change = table_delete(ctx, table)
-        except ValueError as e:
-            ctx.close()
-            env = error_envelope(
-                "table.delete", "ERR_TABLE_NOT_FOUND",
-                str(e),
-                target=Target(file=file, table=table),
-            )
-            _emit(env)
-            return
-
-        backup_path = None
-        if not dry_run:
-            if backup:
-                from xl.io.fileops import backup as make_backup
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "table.delete",
+            mutate_fn=lambda ctx: table_delete(ctx, table),
+            dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except ValueError as e:
+        env = error_envelope(
+            "table.delete", "ERR_TABLE_NOT_FOUND",
+            str(e),
+            target=Target(file=file, table=table),
+        )
+        _emit(env)
 
     result = {"dry_run": dry_run, "backup_path": backup_path, "table": table}
     env = success_envelope(
@@ -1289,6 +1309,7 @@ def table_delete_column_cmd(
     name: Annotated[str, typer.Option("--name", "-n", help="Column name to delete")],
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Delete a column from an Excel Table. Mutating.
@@ -1301,29 +1322,20 @@ def table_delete_column_cmd(
     """
     from xl.adapters.openpyxl_engine import table_delete_column
 
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "table.delete_column")
-
-        try:
-            change = table_delete_column(ctx, table, name)
-        except ValueError as e:
-            ctx.close()
-            code = "ERR_COLUMN_NOT_FOUND" if "column" in str(e).lower() else "ERR_TABLE_NOT_FOUND"
-            env = error_envelope(
-                "table.delete_column", code,
-                str(e),
-                target=Target(file=file, table=table),
-            )
-            _emit(env)
-            return
-
-        backup_path = None
-        if not dry_run:
-            if backup:
-                from xl.io.fileops import backup as make_backup
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "table.delete_column",
+            mutate_fn=lambda ctx: table_delete_column(ctx, table, name),
+            dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except ValueError as e:
+        code = "ERR_COLUMN_NOT_FOUND" if "column" in str(e).lower() else "ERR_TABLE_NOT_FOUND"
+        env = error_envelope(
+            "table.delete_column", code,
+            str(e),
+            target=Target(file=file, table=table),
+        )
+        _emit(env)
 
     result = {"dry_run": dry_run, "backup_path": backup_path, "table": table, "column": name}
     env = success_envelope(
@@ -1347,6 +1359,7 @@ def cell_set_cmd(
     force_overwrite_formulas: Annotated[bool, typer.Option("--force-overwrite-formulas", help="Allow overwriting a cell that contains a formula")] = False,
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Set a cell value. Mutating.
@@ -1367,7 +1380,7 @@ def cell_set_cmd(
     """
     from xl.adapters.openpyxl_engine import cell_set
 
-    # Parse sheet!ref
+    # Parse sheet!ref (before lock — no file access needed)
     if "!" in ref:
         sheet_name, cell_ref = ref.split("!", 1)
     else:
@@ -1395,24 +1408,16 @@ def cell_set_cmd(
             except ValueError:
                 continue
 
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "cell.set")
-
-        try:
-            change = cell_set(ctx, sheet_name, cell_ref, parsed_value, cell_type=cell_type, force_overwrite_formulas=force_overwrite_formulas)
-        except (ValueError, KeyError) as e:
-            ctx.close()
-            code = "ERR_FORMULA_OVERWRITE_BLOCKED" if "formula" in str(e).lower() else "ERR_RANGE_INVALID"
-            env = error_envelope("cell.set", code, str(e), target=Target(file=file, ref=ref))
-            _emit(env)
-
-        backup_path = None
-        if not dry_run:
-            if backup:
-                from xl.io.fileops import backup as make_backup
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "cell.set",
+            mutate_fn=lambda ctx: cell_set(ctx, sheet_name, cell_ref, parsed_value, cell_type=cell_type, force_overwrite_formulas=force_overwrite_formulas),
+            dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except (ValueError, KeyError) as e:
+        code = "ERR_FORMULA_OVERWRITE_BLOCKED" if "formula" in str(e).lower() else "ERR_RANGE_INVALID"
+        env = error_envelope("cell.set", code, str(e), target=Target(file=file, ref=ref))
+        _emit(env)
 
     result = {"dry_run": dry_run, "backup_path": backup_path}
     env = success_envelope(
@@ -2175,6 +2180,7 @@ def apply_cmd(
     plan_path: Annotated[str, typer.Option("--plan", help="Path to raw patch plan JSON file (use --out or --append)")],
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview all changes without writing to disk")] = False,
     do_backup: Annotated[bool, typer.Option("--backup/--no-backup", help="Create timestamped .bak copy before writing (default: on)")] = True,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Apply a patch plan to a workbook. Mutating.
@@ -2191,6 +2197,8 @@ def apply_cmd(
 
     See also: `xl validate plan` to check before applying, `xl verify assert` to check after.
     """
+    import portalocker as _pl
+
     from xl.adapters.openpyxl_engine import (
         cell_set,
         format_number,
@@ -2199,123 +2207,137 @@ def apply_cmd(
         table_append_rows,
         table_create,
     )
-    from xl.io.fileops import backup as make_backup
-    from xl.io.fileops import fingerprint
+    from xl.io.fileops import WorkbookLock, backup as make_backup, fingerprint
     from xl.validation.validators import validate_plan
 
-    # Load plan
+    # Load plan (before lock — JSON parsing only)
     try:
         plan = _load_patch_plan(plan_path)
     except ValueError as e:
         _emit_invalid_plan("apply", file, str(e))
         return
 
+    # Acquire lock for the entire apply cycle
+    try:
+        lock = WorkbookLock(file, timeout=wait_lock)
+    except OSError as exc:
+        env = error_envelope("apply", "ERR_IO", f"Cannot create lock file: {exc}", target=Target(file=file))
+        _emit(env)
+
     with Timer() as t:
-        # Load workbook
-        ctx = _load_ctx_or_emit(file, "apply")
+        try:
+            with lock:
+                # Load workbook (inside lock)
+                ctx = _load_ctx_or_emit(file, "apply")
 
-        fp_before = ctx.fp
+                fp_before = ctx.fp
 
-        # Fingerprint conflict check
-        if plan.target.fingerprint and plan.options.fail_on_external_change:
-            if plan.target.fingerprint != fp_before:
+                # Fingerprint conflict check (inside lock — no TOCTOU)
+                if plan.target.fingerprint and plan.options.fail_on_external_change:
+                    if plan.target.fingerprint != fp_before:
+                        ctx.close()
+                        env = error_envelope(
+                            "apply", "ERR_PLAN_FINGERPRINT_CONFLICT",
+                            "Workbook fingerprint changed since plan was created",
+                            target=Target(file=file),
+                            details={"expected": plan.target.fingerprint, "actual": fp_before},
+                        )
+                        _emit(env)
+                        return
+
+                # Validate plan
+                val_result = validate_plan(ctx, plan)
+                if not val_result.valid:
+                    ctx.close()
+                    env = error_envelope(
+                        "apply", "ERR_VALIDATION_FAILED",
+                        "Plan validation failed",
+                        target=Target(file=file),
+                        details={"checks": val_result.checks},
+                    )
+                    _emit(env)
+                    return
+
+                # Execute operations
+                changes: list[ChangeRecord] = []
+                for op in plan.operations:
+                    try:
+                        if op.type == "table.add_column":
+                            change = table_add_column(ctx, op.table, op.name, formula=op.formula, default_value=op.value)
+                            changes.append(change)
+                        elif op.type == "table.append_rows":
+                            change = table_append_rows(ctx, op.table, op.rows or [], schema_mode=op.schema_mode or "strict")
+                            changes.append(change)
+                        elif op.type == "cell.set":
+                            sheet_name = op.sheet or ""
+                            change = cell_set(ctx, sheet_name, op.ref or "", op.value, force_overwrite_formulas=op.force_overwrite_formulas)
+                            changes.append(change)
+                        elif op.type == "format.number":
+                            ref_str = op.ref or ""
+                            sheet_name = ""
+                            actual_ref = ref_str
+                            resolved = resolve_table_column_ref(ctx, ref_str)
+                            if resolved:
+                                sheet_name, actual_ref = resolved
+                            elif "!" in ref_str:
+                                sheet_name, actual_ref = ref_str.split("!", 1)
+
+                            if sheet_name:
+                                change = format_number(ctx, sheet_name, actual_ref, style=op.style or "number", decimals=op.decimals if op.decimals is not None else 2)
+                                changes.append(change)
+                        elif op.type == "table.create":
+                            change = table_create(ctx, op.sheet or "", op.table or "", op.ref or "",
+                                                  columns=op.columns, style=op.style or "TableStyleMedium2")
+                            changes.append(change)
+                        elif op.type == "sheet.delete":
+                            from xl.adapters.openpyxl_engine import sheet_delete
+                            change = sheet_delete(ctx, op.sheet or "")
+                            changes.append(change)
+                        elif op.type == "sheet.rename":
+                            from xl.adapters.openpyxl_engine import sheet_rename
+                            change = sheet_rename(ctx, op.sheet or "", op.new_name or "")
+                            changes.append(change)
+                        elif op.type == "table.delete":
+                            from xl.adapters.openpyxl_engine import table_delete
+                            change = table_delete(ctx, op.table or "")
+                            changes.append(change)
+                        elif op.type == "table.delete_column":
+                            from xl.adapters.openpyxl_engine import table_delete_column
+                            change = table_delete_column(ctx, op.table or "", op.column or "")
+                            changes.append(change)
+                        else:
+                            changes.append(ChangeRecord(
+                                op_id=op.op_id,
+                                type=op.type,
+                                target=str(op.ref or op.table or ""),
+                                after={"status": "skipped", "reason": f"Unsupported operation type: {op.type}"},
+                            ))
+                    except Exception as e:
+                        ctx.close()
+                        env = error_envelope(
+                            "apply", "ERR_OPERATION_FAILED",
+                            f"Operation {op.op_id} failed: {e}",
+                            target=Target(file=file),
+                        )
+                        _emit(env)
+                        return
+
+                # Save
+                backup_path = None
+                fp_after = None
+                if not dry_run:
+                    if do_backup:
+                        backup_path = make_backup(file)
+                    ctx.save(file)
+                    fp_after = fingerprint(file)
                 ctx.close()
-                env = error_envelope(
-                    "apply", "ERR_PLAN_FINGERPRINT_CONFLICT",
-                    "Workbook fingerprint changed since plan was created",
-                    target=Target(file=file),
-                    details={"expected": plan.target.fingerprint, "actual": fp_before},
-                )
-                _emit(env)
-                return
-
-        # Validate plan
-        val_result = validate_plan(ctx, plan)
-        if not val_result.valid:
-            ctx.close()
+        except _pl.LockException:
             env = error_envelope(
-                "apply", "ERR_VALIDATION_FAILED",
-                "Plan validation failed",
+                "apply", "ERR_LOCK_HELD",
+                f"File is locked by another process: {file}",
                 target=Target(file=file),
-                details={"checks": val_result.checks},
             )
             _emit(env)
-            return
-
-        # Execute operations
-        changes: list[ChangeRecord] = []
-        for op in plan.operations:
-            try:
-                if op.type == "table.add_column":
-                    change = table_add_column(ctx, op.table, op.name, formula=op.formula, default_value=op.value)
-                    changes.append(change)
-                elif op.type == "table.append_rows":
-                    change = table_append_rows(ctx, op.table, op.rows or [], schema_mode=op.schema_mode or "strict")
-                    changes.append(change)
-                elif op.type == "cell.set":
-                    sheet_name = op.sheet or ""
-                    change = cell_set(ctx, sheet_name, op.ref or "", op.value, force_overwrite_formulas=op.force_overwrite_formulas)
-                    changes.append(change)
-                elif op.type == "format.number":
-                    ref_str = op.ref or ""
-                    sheet_name = ""
-                    actual_ref = ref_str
-                    # Resolve table column refs
-                    resolved = resolve_table_column_ref(ctx, ref_str)
-                    if resolved:
-                        sheet_name, actual_ref = resolved
-                    elif "!" in ref_str:
-                        sheet_name, actual_ref = ref_str.split("!", 1)
-
-                    if sheet_name:
-                        change = format_number(ctx, sheet_name, actual_ref, style=op.style or "number", decimals=op.decimals if op.decimals is not None else 2)
-                        changes.append(change)
-                elif op.type == "table.create":
-                    change = table_create(ctx, op.sheet or "", op.table or "", op.ref or "",
-                                          columns=op.columns, style=op.style or "TableStyleMedium2")
-                    changes.append(change)
-                elif op.type == "sheet.delete":
-                    from xl.adapters.openpyxl_engine import sheet_delete
-                    change = sheet_delete(ctx, op.sheet or "")
-                    changes.append(change)
-                elif op.type == "sheet.rename":
-                    from xl.adapters.openpyxl_engine import sheet_rename
-                    change = sheet_rename(ctx, op.sheet or "", op.new_name or "")
-                    changes.append(change)
-                elif op.type == "table.delete":
-                    from xl.adapters.openpyxl_engine import table_delete
-                    change = table_delete(ctx, op.table or "")
-                    changes.append(change)
-                elif op.type == "table.delete_column":
-                    from xl.adapters.openpyxl_engine import table_delete_column
-                    change = table_delete_column(ctx, op.table or "", op.column or "")
-                    changes.append(change)
-                else:
-                    changes.append(ChangeRecord(
-                        op_id=op.op_id,
-                        type=op.type,
-                        target=str(op.ref or op.table or ""),
-                        after={"status": "skipped", "reason": f"Unsupported operation type: {op.type}"},
-                    ))
-            except Exception as e:
-                ctx.close()
-                env = error_envelope(
-                    "apply", "ERR_OPERATION_FAILED",
-                    f"Operation {op.op_id} failed: {e}",
-                    target=Target(file=file),
-                )
-                _emit(env)
-                return
-
-        # Save
-        backup_path = None
-        fp_after = None
-        if not dry_run:
-            if do_backup:
-                backup_path = make_backup(file)
-            ctx.save(file)
-            fp_after = fingerprint(file)
-        ctx.close()
 
     result_data = ApplyResult(
         applied=not dry_run,
@@ -2570,6 +2592,7 @@ def range_clear_cmd(
     clear_all: Annotated[bool, typer.Option("--all", help="Clear both contents and formatting")] = False,
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Clear a range of cells — values, formulas, and/or formatting. Mutating.
@@ -2583,6 +2606,7 @@ def range_clear_cmd(
     """
     from xl.adapters.openpyxl_engine import range_clear
 
+    # Validate ref (before lock — no file access needed)
     if "!" not in ref:
         env = error_envelope("range.clear", "ERR_RANGE_INVALID", "Ref must include sheet name", target=Target(file=file))
         _emit(env)
@@ -2596,21 +2620,18 @@ def range_clear_cmd(
         do_contents = contents
         do_formats = formats
     else:
-        # Default behavior remains content-only clear for backward compatibility.
         do_contents = True
         do_formats = False
 
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "range.clear")
-        change = range_clear(ctx, sheet_name, range_ref, contents=do_contents, formats=do_formats)
-
-        backup_path = None
-        if not dry_run:
-            if backup:
-                from xl.io.fileops import backup as make_backup
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "range.clear",
+            mutate_fn=lambda ctx: range_clear(ctx, sheet_name, range_ref, contents=do_contents, formats=do_formats),
+            dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except (ValueError, KeyError) as e:
+        env = error_envelope("range.clear", "ERR_RANGE_INVALID", str(e), target=Target(file=file, ref=ref))
+        _emit(env)
 
     result = {"dry_run": dry_run, "backup_path": backup_path}
     env = success_envelope(
@@ -2633,6 +2654,7 @@ def formula_set_cmd(
     fill_mode: Annotated[str, typer.Option("--fill-mode", help="'fixed' copies formula literally; 'relative' adjusts A1-refs per cell (like Excel fill-down)")] = "relative",
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Set a formula on a cell, range, or table column. Mutating.
@@ -2653,39 +2675,29 @@ def formula_set_cmd(
     """
     from xl.adapters.openpyxl_engine import formula_set, resolve_table_column_ref
 
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "formula.set")
-
-        # Resolve ref
+    def _do(ctx):
         resolved = resolve_table_column_ref(ctx, ref, include_header=False)
         if resolved:
             sheet_name, cell_ref = resolved
         elif "!" in ref:
             sheet_name, cell_ref = ref.split("!", 1)
         else:
-            ctx.close()
-            env = error_envelope("formula.set", "ERR_RANGE_INVALID", "Ref must include sheet (Sheet!A1) or be a table column (Table[Col])", target=Target(file=file))
-            _emit(env)
-            return
+            raise ValueError("Ref must include sheet (Sheet!A1) or be a table column (Table[Col])")
+        return formula_set(ctx, sheet_name, cell_ref, formula,
+                           force_overwrite_values=force_overwrite_values,
+                           force_overwrite_formulas=force_overwrite_formulas,
+                           fill_mode=fill_mode)
 
-        try:
-            change = formula_set(ctx, sheet_name, cell_ref, formula,
-                                 force_overwrite_values=force_overwrite_values,
-                                 force_overwrite_formulas=force_overwrite_formulas,
-                                 fill_mode=fill_mode)
-        except (ValueError, KeyError) as e:
-            ctx.close()
-            env = error_envelope("formula.set", "ERR_FORMULA_BLOCKED", str(e), target=Target(file=file, ref=ref))
-            _emit(env)
-            return
-
-        backup_path = None
-        if not dry_run:
-            if backup:
-                from xl.io.fileops import backup as make_backup
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "formula.set",
+            mutate_fn=_do,
+            dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except (ValueError, KeyError) as e:
+        code = "ERR_RANGE_INVALID" if "Ref must include" in str(e) else "ERR_FORMULA_BLOCKED"
+        env = error_envelope("formula.set", code, str(e), target=Target(file=file, ref=ref))
+        _emit(env)
 
     result = {"dry_run": dry_run, "backup_path": backup_path}
     env = success_envelope(
@@ -2829,6 +2841,7 @@ def format_number_cmd(
     decimals: Annotated[int, typer.Option("--decimals", help="Decimal places (default: 2)")] = 2,
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Apply number format to a range or table column. Mutating.
@@ -2843,35 +2856,26 @@ def format_number_cmd(
     """
     from xl.adapters.openpyxl_engine import format_number, resolve_table_column_ref
 
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "format.number")
-
+    def _do(ctx):
         resolved = resolve_table_column_ref(ctx, ref)
         if resolved:
             sheet_name, cell_ref = resolved
         elif "!" in ref:
             sheet_name, cell_ref = ref.split("!", 1)
         else:
-            ctx.close()
-            env = error_envelope("format.number", "ERR_RANGE_INVALID", "Ref must include sheet or be Table[Col]", target=Target(file=file))
-            _emit(env)
-            return
+            raise ValueError("Ref must include sheet or be Table[Col]")
+        return format_number(ctx, sheet_name, cell_ref, style=style, decimals=decimals)
 
-        try:
-            change = format_number(ctx, sheet_name, cell_ref, style=style, decimals=decimals)
-        except ValueError as e:
-            ctx.close()
-            env = error_envelope("format.number", "ERR_INVALID_ARGUMENT", str(e), target=Target(file=file, ref=ref))
-            _emit(env)
-            return
-
-        backup_path = None
-        if not dry_run:
-            if backup:
-                from xl.io.fileops import backup as make_backup
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "format.number",
+            mutate_fn=_do,
+            dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except ValueError as e:
+        code = "ERR_RANGE_INVALID" if "Ref must include" in str(e) else "ERR_INVALID_ARGUMENT"
+        env = error_envelope("format.number", code, str(e), target=Target(file=file, ref=ref))
+        _emit(env)
 
     result = {"dry_run": dry_run, "backup_path": backup_path}
     env = success_envelope(
@@ -2892,6 +2896,7 @@ def format_width_cmd(
     width: Annotated[float, typer.Option("--width", help="Column width in character units (Excel default is ~8.43)")],
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Set column widths on a sheet. Mutating.
@@ -2930,17 +2935,15 @@ def format_width_cmd(
         _emit(env)
         return
 
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "format.width")
-        change = format_width(ctx, sheet, col_list, width)
-
-        backup_path = None
-        if not dry_run:
-            if backup:
-                from xl.io.fileops import backup as make_backup
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "format.width",
+            mutate_fn=lambda ctx: format_width(ctx, sheet, col_list, width),
+            dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except (ValueError, KeyError) as e:
+        env = error_envelope("format.width", "ERR_RANGE_INVALID", str(e), target=Target(file=file, sheet=sheet))
+        _emit(env)
 
     result = {"dry_run": dry_run, "backup_path": backup_path}
     env = success_envelope(
@@ -2961,6 +2964,7 @@ def format_freeze_cmd(
     unfreeze: Annotated[bool, typer.Option("--unfreeze", help="Remove all freeze panes from the sheet")] = False,
     backup: Annotated[bool, typer.Option("--backup", help="Create timestamped .bak copy before writing")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview changes without writing to disk")] = False,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Freeze or unfreeze panes on a sheet. Mutating.
@@ -2974,6 +2978,7 @@ def format_freeze_cmd(
     """
     from xl.adapters.openpyxl_engine import format_freeze
 
+    # Validate args (before lock — no file access needed)
     if unfreeze and ref:
         env = error_envelope("format.freeze", "ERR_INVALID_ARGUMENT", "Use either --ref or --unfreeze, not both", target=Target(file=file, sheet=sheet))
         _emit(env)
@@ -2985,17 +2990,15 @@ def format_freeze_cmd(
         _emit(env)
         return
 
-    with Timer() as t:
-        ctx = _load_ctx_or_emit(file, "format.freeze")
-        change = format_freeze(ctx, sheet, freeze_ref)
-
-        backup_path = None
-        if not dry_run:
-            if backup:
-                from xl.io.fileops import backup as make_backup
-                backup_path = make_backup(file)
-            ctx.save(file)
-        ctx.close()
+    try:
+        change, backup_path, t = _mutate_workbook(
+            file, "format.freeze",
+            mutate_fn=lambda ctx: format_freeze(ctx, sheet, freeze_ref),
+            dry_run=dry_run, do_backup=backup, wait_lock=wait_lock,
+        )
+    except (ValueError, KeyError) as e:
+        env = error_envelope("format.freeze", "ERR_RANGE_INVALID", str(e), target=Target(file=file, sheet=sheet))
+        _emit(env)
 
     result = {"dry_run": dry_run, "backup_path": backup_path}
     env = success_envelope(
@@ -3244,6 +3247,7 @@ def diff_compare_cmd(
 def run_cmd(
     workflow_file: Annotated[str, typer.Option("--workflow", "-w", help="Path to YAML workflow file defining steps to execute")],
     file: Annotated[Optional[str], typer.Option("--file", "-f", help="Override the target workbook (instead of workflow's target.file)")] = None,
+    wait_lock: WaitLockOpt = 0,
     json_out: JsonFlag = True,
 ):
     """Execute a multi-step YAML workflow.
@@ -3299,9 +3303,15 @@ def run_cmd(
             return
 
         try:
-            result = execute_workflow(workflow, workbook_path)
+            result = execute_workflow(workflow, workbook_path, wait_lock=wait_lock)
         except Exception as e:
-            env = error_envelope("run", "ERR_WORKFLOW_FAILED", str(e), target=Target(file=workbook_path))
+            import portalocker as _pl
+            if isinstance(e, _pl.LockException):
+                env = error_envelope("run", "ERR_LOCK_HELD",
+                    f"File is locked by another process: {workbook_path}",
+                    target=Target(file=workbook_path))
+            else:
+                env = error_envelope("run", "ERR_WORKFLOW_FAILED", str(e), target=Target(file=workbook_path))
             _emit(env)
             return
 
